@@ -75,6 +75,12 @@ type statsCollector struct {
 	// re-spawn (and re-warn about) a missing binary every tick.
 	nvidiaUnavailable atomic.Bool
 
+	// accels are the per-device inference-accelerator samplers (accel_linux.go),
+	// one goroutine each at a finer interval than the tick; the tick only folds
+	// their latest published sample into the snapshot. Nil on hosts without
+	// the gasket/apex driver.
+	accels []*accelSampler
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -94,6 +100,7 @@ func startStatsCollector() *statsCollector {
 	// Prime the CPU baseline so the first tick produces a real delta rather
 	// than a spurious reading (with no previous sample, util reports 0).
 	c.prevCPU = readCPUTimes()
+	c.accels = startAccelSamplers(listApexDevices())
 	go c.run()
 	return c
 }
@@ -147,7 +154,30 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 		sampledAt = time.Now()
 	}
 	applyGPUStats(previous, snap, gpu, sampledAt)
+	c.mergeAccelStats(snap)
 	return snap
+}
+
+// mergeAccelStats adds each accelerator sampler's latest sample to the
+// snapshot's GPU map under its accelStatsKey. It runs after applyGPUStats so
+// the stale-preserve path (which may alias the previous, already-published
+// map) never gets mutated: when there is anything to add, the map is cloned
+// first. Accelerator samples deliberately leave GPUSampledAt untouched — they
+// are not GPU telemetry and must not mark it fresh.
+func (c *statsCollector) mergeAccelStats(snap *statsSnapshot) {
+	if len(c.accels) == 0 {
+		return
+	}
+	merged := make(map[string]gpuStat, len(snap.GPU)+len(c.accels))
+	for k, v := range snap.GPU {
+		merged[k] = v
+	}
+	for _, a := range c.accels {
+		if st, ok := a.Latest(); ok {
+			merged[a.key] = st
+		}
+	}
+	snap.GPU = merged
 }
 
 // decodeGPU queries nvidia-smi and folds the per-GPU results into out, keyed
@@ -190,6 +220,9 @@ func (c *statsCollector) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stop)
 		<-c.done
+		for _, a := range c.accels {
+			a.Stop()
+		}
 	})
 }
 

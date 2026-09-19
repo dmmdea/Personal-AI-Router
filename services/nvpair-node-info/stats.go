@@ -19,6 +19,9 @@ import (
 type gpuStat struct {
 	VRAMUsed       uint64
 	UtilizationPct uint32
+	// TemperatureC is filled only by sources that expose a device thermal
+	// readout (the Linux accelerator sampler); zero means unavailable.
+	TemperatureC uint32
 }
 
 // statsSnapshot is the dynamic bundle the HTTP handler reads without locking.

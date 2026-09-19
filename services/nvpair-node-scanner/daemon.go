@@ -1634,12 +1634,7 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 			age += elapsed
 		}
 	}
-	var utilization uint32
-	for i := range info.GPUs {
-		if info.GPUs[i].UtilizationPercent > utilization {
-			utilization = info.GPUs[i].UtilizationPercent
-		}
-	}
+	utilization := noderec.MaxGPUUtilization(info.GPUs)
 	d.emitTelemetry(noderec.NodeTelemetry{
 		HostUUID:          hostUUID,
 		GPUUtilizationPct: utilization,
