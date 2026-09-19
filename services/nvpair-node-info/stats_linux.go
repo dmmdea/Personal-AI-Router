@@ -75,6 +75,16 @@ type statsCollector struct {
 	// re-spawn (and re-warn about) a missing binary every tick.
 	nvidiaUnavailable atomic.Bool
 
+	// accels are the per-device inference-accelerator samplers (accel_linux.go),
+	// one goroutine each at a finer interval than the tick; the tick only folds
+	// their latest published sample into the snapshot. Nil on hosts without
+	// the gasket/apex driver.
+	accels []*accelSampler
+
+	// cpuTemp is the sysfs file holding the CPU package temperature, resolved
+	// once at start (cputemp_linux.go); empty when the host exposes none.
+	cpuTemp cpuTempSource
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -94,6 +104,13 @@ func startStatsCollector() *statsCollector {
 	// Prime the CPU baseline so the first tick produces a real delta rather
 	// than a spurious reading (with no previous sample, util reports 0).
 	c.prevCPU = readCPUTimes()
+	c.accels = startAccelSamplers(listApexDevices())
+	c.cpuTemp = findCPUTempSource()
+	if c.cpuTemp.path != "" {
+		slog.Info("CPU temperature source", "path", c.cpuTemp.path)
+	} else {
+		slog.Info("no CPU temperature source on this host; cpu.temperature_celsius will be omitted")
+	}
 	go c.run()
 	return c
 }
@@ -140,6 +157,9 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if used, ok := readMemoryUsed(); ok {
 		snap.MemUsedBytes = used
 	}
+	if t, ok := c.cpuTemp.read(); ok {
+		snap.CPUTempC = t
+	}
 
 	gpu := make(map[string]gpuStat)
 	sampledAt := time.Time{}
@@ -147,7 +167,30 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 		sampledAt = time.Now()
 	}
 	applyGPUStats(previous, snap, gpu, sampledAt)
+	c.mergeAccelStats(snap)
 	return snap
+}
+
+// mergeAccelStats adds each accelerator sampler's latest sample to the
+// snapshot's GPU map under its accelStatsKey. It runs after applyGPUStats so
+// the stale-preserve path (which may alias the previous, already-published
+// map) never gets mutated: when there is anything to add, the map is cloned
+// first. Accelerator samples deliberately leave GPUSampledAt untouched — they
+// are not GPU telemetry and must not mark it fresh.
+func (c *statsCollector) mergeAccelStats(snap *statsSnapshot) {
+	if len(c.accels) == 0 {
+		return
+	}
+	merged := make(map[string]gpuStat, len(snap.GPU)+len(c.accels))
+	for k, v := range snap.GPU {
+		merged[k] = v
+	}
+	for _, a := range c.accels {
+		if st, ok := a.Latest(); ok {
+			merged[a.key] = st
+		}
+	}
+	snap.GPU = merged
 }
 
 // decodeGPU queries nvidia-smi and folds the per-GPU results into out, keyed
@@ -158,7 +201,7 @@ func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	if c.nvidiaUnavailable.Load() {
 		return false
 	}
-	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used")
+	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used,temperature.gpu")
 	if err != nil {
 		if c.nvidiaUnavailable.CompareAndSwap(false, true) {
 			slog.Warn("nvidia-smi unavailable; GPU utilization / dedicated VRAM-used will not be reported",
@@ -190,6 +233,9 @@ func (c *statsCollector) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stop)
 		<-c.done
+		for _, a := range c.accels {
+			a.Stop()
+		}
 	})
 }
 
@@ -335,6 +381,13 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		}
 		if mib, err := strconv.ParseUint(fields[2], 10, 64); err == nil {
 			stat.VRAMUsed = mib * 1024 * 1024
+		}
+		// temperature.gpu is whole degrees Celsius; [N/A] (some virtual or
+		// headless SKUs) and a missing column leave it zero (omitted).
+		if len(fields) >= 4 {
+			if c, err := strconv.ParseUint(fields[3], 10, 32); err == nil {
+				stat.TemperatureC = uint32(c)
+			}
 		}
 		res[uuid] = stat
 	}

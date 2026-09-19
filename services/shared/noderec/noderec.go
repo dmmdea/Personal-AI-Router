@@ -433,12 +433,47 @@ type GPUInfo struct {
 	VramBytes          uint64 `json:"vram_bytes,omitempty"`
 	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// Kind distinguishes a display/compute GPU (empty, the historical default)
+	// from a dedicated inference accelerator such as an Edge TPU or an NPU
+	// (GPUKindAccelerator). Accelerators are listed in the same inventory so
+	// every client shows them, but they cannot run the engines PAIR schedules,
+	// so their utilization never feeds a node's GPU pressure — see
+	// MaxGPUUtilization.
+	Kind string `json:"kind,omitempty"`
+	// TemperatureCelsius is the device's own thermal readout when the driver
+	// exposes one (accelerators do; GPUs leave it zero and it drops from JSON).
+	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+}
+
+// GPUKindAccelerator marks a GPUInfo row that describes a dedicated inference
+// accelerator rather than a GPU: an Edge TPU, an NPU, an M.2 AI module.
+const GPUKindAccelerator = "npu"
+
+// MaxGPUUtilization is the node-level GPU busy figure the scheduler's pressure
+// model consumes: the highest utilization across the node's GPUs. Accelerator
+// rows are excluded — a saturated Edge TPU says nothing about whether the
+// node's GPU can take another LLM job, and folding it in would push the node
+// into a higher pressure band for work it could serve.
+func MaxGPUUtilization(gpus []GPUInfo) uint32 {
+	var utilization uint32
+	for i := range gpus {
+		if gpus[i].Kind == GPUKindAccelerator {
+			continue
+		}
+		if gpus[i].UtilizationPercent > utilization {
+			utilization = gpus[i].UtilizationPercent
+		}
+	}
+	return utilization
 }
 
 type CPUInfo struct {
 	Name               string `json:"name,omitempty"`
 	Cores              uint32 `json:"cores,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// TemperatureCelsius is the CPU package temperature when the host exposes
+	// one (Linux hwmon); omitted where no driverless source exists.
+	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
 }
 
 type MemoryInfo struct {

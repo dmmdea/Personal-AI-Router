@@ -109,7 +109,7 @@ var (
 	procPdhGetFormattedCounterArrayW = modPDH.NewProc("PdhGetFormattedCounterArrayW")
 	procPdhCloseQuery                = modPDH.NewProc("PdhCloseQuery")
 
-	modKernel32             = windows.NewLazySystemDLL("kernel32.dll")
+	modKernel32              = windows.NewLazySystemDLL("kernel32.dll")
 	procGlobalMemoryStatusEx = modKernel32.NewProc("GlobalMemoryStatusEx")
 
 	// Per-counter "unavailable" latches. Set once on first
@@ -193,6 +193,10 @@ type statsCollector struct {
 	// the previous one.
 	latest atomic.Pointer[statsSnapshot]
 
+	// gpuTemps is the slow nvidia-smi poller (gputemp_windows.go); each
+	// tick merges its latest LUID-keyed temperatures into the snapshot.
+	gpuTemps *gpuTempPoller
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -227,6 +231,7 @@ func startStatsCollector() *statsCollector {
 			"effect", "GPU and CPU utilization / VRAM-used will not be reported; memory-used still works")
 	}
 
+	c.gpuTemps = startGPUTempPoller()
 	go c.run()
 	return c
 }
@@ -338,6 +343,10 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if snap.GPU == nil {
 		applyGPUStats(previous, snap, nil, time.Time{})
 	}
+	// Temperatures come from the slow nvidia-smi poller, keyed by the same
+	// LUID keys as the PDH counters; merged after the stale-preserve step so
+	// a previously published map is cloned, never mutated.
+	c.gpuTemps.mergeInto(snap)
 
 	if used, ok := readMemoryUsed(); ok {
 		snap.MemUsedBytes = used
@@ -544,6 +553,7 @@ func (c *statsCollector) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stop)
 		<-c.done
+		c.gpuTemps.Stop()
 		if c.query != 0 {
 			procPdhCloseQuery.Call(c.query)
 			c.query = 0

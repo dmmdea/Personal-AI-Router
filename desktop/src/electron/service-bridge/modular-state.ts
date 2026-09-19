@@ -202,12 +202,17 @@ interface ModularGpu {
     vramBytes: number
     vramUsedBytes: number
     utilizationPercent: number
+    // Whole degrees Celsius; 0 when the node reports none.
+    temperatureCelsius: number
+    // "npu" for an accelerator row (Edge TPU / NPU); "" for a GPU.
+    kind: string
 }
 
 interface ModularCpu {
     name: string
     cores: number
     utilizationPercent: number
+    temperatureCelsius: number
 }
 
 interface ModularMemory {
@@ -507,7 +512,9 @@ function gpuArrayValue(value: JsonValue | undefined): ModularGpu[] {
             name: stringValue(obj.name),
             vramBytes: numberValue(obj.vram_bytes),
             vramUsedBytes: numberValue(obj.vram_used_bytes),
-            utilizationPercent: numberValue(obj.utilization_percent)
+            utilizationPercent: numberValue(obj.utilization_percent),
+            temperatureCelsius: numberValue(obj.temperature_celsius),
+            kind: stringValue(obj.kind)
         })
     }
     return gpus.sort((left, right) => nvidiaGpuRank(left) - nvidiaGpuRank(right))
@@ -519,7 +526,8 @@ function cpuValue(value: JsonValue | undefined): ModularCpu | null {
     return {
         name: stringValue(obj.name),
         cores: numberValue(obj.cores),
-        utilizationPercent: numberValue(obj.utilization_percent)
+        utilizationPercent: numberValue(obj.utilization_percent),
+        temperatureCelsius: numberValue(obj.temperature_celsius)
     }
 }
 
@@ -542,7 +550,9 @@ function sameGpu(left: ModularGpu, right: ModularGpu): boolean {
         left.name === right.name &&
         left.vramBytes === right.vramBytes &&
         left.vramUsedBytes === right.vramUsedBytes &&
-        left.utilizationPercent === right.utilizationPercent
+        left.utilizationPercent === right.utilizationPercent &&
+        left.temperatureCelsius === right.temperatureCelsius &&
+        left.kind === right.kind
     )
 }
 
@@ -559,7 +569,8 @@ function sameCpu(left: ModularCpu | null, right: ModularCpu | null): boolean {
     return (
         left.name === right.name &&
         left.cores === right.cores &&
-        left.utilizationPercent === right.utilizationPercent
+        left.utilizationPercent === right.utilizationPercent &&
+        left.temperatureCelsius === right.temperatureCelsius
     )
 }
 
@@ -638,7 +649,8 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
             gpus: node.gpus.map((gpu, index) => ({
                 id: `${node.id}:gpu:${index}`,
                 name: gpu.name,
-                vramTotal: gpu.vramBytes
+                vramTotal: gpu.vramBytes,
+                ...(gpu.kind ? { kind: gpu.kind } : {})
             })),
             ram: node.memory?.totalBytes ?? 0,
             storage: [],
@@ -668,7 +680,12 @@ function toMetrics(node: ModularNode): NodeItemMetrics {
         gpuVramUsage: node.gpus.map((gpu, index) => ({
             id: `${node.id}:gpu:${index}`,
             value: gpu.vramBytes > 0 ? (gpu.vramUsedBytes / gpu.vramBytes) * 100 : 0
-        }))
+        })),
+        gpuTemperature: node.gpus.map((gpu, index) => ({
+            id: `${node.id}:gpu:${index}`,
+            value: gpu.temperatureCelsius
+        })),
+        cpuTemperature: node.cpu?.temperatureCelsius ?? 0
     }
     return { id: node.id, current, historical: [current] }
 }

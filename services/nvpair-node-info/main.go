@@ -32,13 +32,21 @@ type GPUInfo struct {
 	VramBytes          uint64 `json:"vram_bytes,omitempty"`
 	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// Kind is empty for a GPU and noderec.GPUKindAccelerator for a dedicated
+	// inference accelerator (Edge TPU / NPU) listed in the same inventory.
+	// Consumers skip accelerator rows when deriving GPU pressure.
+	Kind string `json:"kind,omitempty"`
+	// TemperatureCelsius is the device's thermal readout when its driver
+	// exposes one (accelerators do); zero drops it from JSON.
+	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
 
 	// statsKey is the opaque per-adapter identifier used to join this
 	// static GPUInfo against statsCollector.Snapshot() results. Its
 	// form is platform-specific: on Windows it's the PDH instance-name
 	// form of the adapter's LUID (e.g. "luid_0x00000000_0x000054f0_phys_0");
-	// on Linux it's the NVIDIA GPU UUID reported by nvidia-smi; on macOS it's
-	// the IORegistry entry ID. Empty on hosts with no dynamic GPU source.
+	// on Linux it's the NVIDIA GPU UUID reported by nvidia-smi (or
+	// "apex:<dev>" for an Edge TPU); on macOS it's the IORegistry entry ID.
+	// Empty on hosts with no dynamic GPU source.
 	// Unexported + json:"-" so it never travels over the wire.
 	statsKey string `json:"-"`
 
@@ -60,6 +68,9 @@ type CPUInfo struct {
 	Name               string `json:"name,omitempty"`
 	Cores              uint32 `json:"cores,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// TemperatureCelsius is the CPU package temperature (Linux: hwmon
+	// coretemp/k10temp, refreshed per tick); zero drops it from JSON.
+	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
 }
 
 // MemoryInfo is the node-level physical-RAM readout. TotalBytes is reported by
@@ -185,6 +196,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 				gpu.VramUsedBytes = s.VRAMUsed
 			}
 			gpu.UtilizationPercent = s.UtilizationPct
+			gpu.TemperatureCelsius = s.TemperatureC
 		}
 	}
 
@@ -199,6 +211,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 	if cpuStatic != nil {
 		cpu := *cpuStatic
 		cpu.UtilizationPercent = snap.CPUUtilPct
+		cpu.TemperatureCelsius = snap.CPUTempC
 		resp.CPU = &cpu
 	}
 	if memTotal > 0 {
@@ -365,6 +378,12 @@ func main() {
 			log.Printf("  GPU %d: %s", i, g.Name)
 		}
 	}
+	accelerators := detectAccelerators()
+	log.Printf("detected %d accelerator(s)", len(accelerators))
+	for i, a := range accelerators {
+		log.Printf("  accelerator %d: %s", i, a.Name)
+	}
+	gpus = append(gpus, accelerators...)
 
 	cpu := detectCPU()
 	if cpu != nil {
