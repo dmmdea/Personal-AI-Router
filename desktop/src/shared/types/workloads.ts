@@ -6,10 +6,19 @@ import { EngineType } from '@/shared/types/engines'
 
 export type WorkloadState = (typeof WorkloadStates)[number]
 
+/**
+ * The engine a workload ran on. The proxy plane produces the closed
+ * `EngineType` union; third-party producers on the workload-manager's
+ * loopback ingress stamp their own identifiers (`llamacpp`, `vllm`,
+ * `whispercpp`, `comfyui`, …). Those are still workloads the broker stored,
+ * so the desktop keeps the identifier instead of dropping the card.
+ */
+export type WorkloadEngine = EngineType | (string & {})
+
 export interface Workload {
     id: string
     model: string
-    engine: EngineType
+    engine: WorkloadEngine
     state: WorkloadState
     /**
      * Owner/origin node of the workload — the node whose proxy received the

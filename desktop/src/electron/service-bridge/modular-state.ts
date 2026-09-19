@@ -347,10 +347,14 @@ function parseWorkload(value: JsonValue | undefined): Workload | null {
     const id = stringValue(obj.id)
     if (!id) return null
     // The workload-manager stamps the engine-manager id (`lmstudio`); map it onto
-    // our closed `EngineType` union (`lm-studio`) before narrowing so LM Studio
-    // jobs are not silently dropped.
-    const engine = engineManagerEngineType(stringValue(obj.engine))
-    if (!engine) return null
+    // our closed `EngineType` union (`lm-studio`) so LM Studio jobs are not
+    // silently dropped. An identifier outside the union comes from a third-party
+    // producer on the workload-manager's loopback ingress (`llamacpp`, `vllm`, …):
+    // the broker stored that workload, so the desktop keeps the raw identifier
+    // instead of dropping the card.
+    const engineRaw = stringValue(obj.engine)
+    if (!engineRaw) return null
+    const engine = engineManagerEngineType(engineRaw) ?? engineRaw
     const stateValue = stringValue(obj.state)
     if (!isWorkloadState(stateValue)) return null
 
