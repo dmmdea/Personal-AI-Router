@@ -94,7 +94,9 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     vramUsage: gpuVramData ? getLatestValue(gpuVramData.data) : 0,
                     usage: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
                     usageColor: getGpuColor(index),
-                    vramColor: getVramColor(index)
+                    vramColor: getVramColor(index),
+                    temperature: nodeMetrics?.gpuTemperature.find(t => t.id === gpu.id)?.value ?? 0,
+                    kind: gpu.kind
                 }
             ]
         })
@@ -109,6 +111,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
             model: node.topology.cpu.model,
             usage: Math.round(cpuUsage),
             usageColor: CHART_COLORS.CPU,
+            temperature: nodeMetrics?.cpuTemperature ?? 0,
             memoryUsage: memUsage,
             memoryUsageFormatted: formatBytes((ramTotal * memUsage) / 100, 1),
             memoryTotalFormatted: formatBytes(ramTotal, 1),

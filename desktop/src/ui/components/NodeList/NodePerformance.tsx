@@ -106,12 +106,15 @@ export default function NodePerformance({
                     utilization: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
                     vramUsage: gpuVramData ? getLatestValue(gpuVramData.data) : 0,
                     color: getGpuColor(index),
-                    vramColor: getVramColor(index)
+                    vramColor: getVramColor(index),
+                    temperature: nodeMetrics?.gpuTemperature.find(t => t.id === gpu.id)?.value ?? 0,
+                    kind: gpu.kind
                 }
             }),
             cpuCores: node.topology.cpu.cores,
             cpuModel: node.topology.cpu.model,
             cpuUtilization: nodeMetrics ? getLatestValue(nodeMetrics.cpuUtilization) : 0,
+            cpuTemperature: nodeMetrics?.cpuTemperature ?? 0,
             memory: formatBytes(node.topology.ram, 1),
             memoryTotal: node.topology.ram,
             memoryUsage: nodeMetrics ? getLatestValue(nodeMetrics.memoryUsage) : 0,
@@ -204,45 +207,72 @@ export default function NodePerformance({
                                     </Flex>
                                 </Flex>
 
-                                {/* GPU VRAM */}
-                                <Flex
-                                    align="center"
-                                    gap="2"
-                                    className="cursor-pointer"
-                                    onClick={() => handleLegendClick(`vram-${gpu.id}`)}
-                                >
+                                {/* GPU VRAM — skipped for an accelerator row (no VRAM figure) */}
+                                {!(gpu.kind === 'npu' && gpu.vramTotal === 0) && (
+                                    <Flex
+                                        align="center"
+                                        gap="2"
+                                        className="cursor-pointer"
+                                        onClick={() => handleLegendClick(`vram-${gpu.id}`)}
+                                    >
+                                        <div
+                                            className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                                            style={{
+                                                backgroundColor: `${gpu.vramColor}BF`,
+                                                border: `2px solid ${gpu.vramColor}`,
+                                                marginTop: '1px',
+                                                opacity:
+                                                    selectedMetric === undefined ||
+                                                    selectedMetric === `vram-${gpu.id}`
+                                                        ? 1
+                                                        : 0.3
+                                            }}
+                                        />
+                                        <Flex
+                                            align="center"
+                                            gap="2"
+                                            className="transition-opacity"
+                                            style={{
+                                                opacity:
+                                                    selectedMetric === undefined ||
+                                                    selectedMetric === `vram-${gpu.id}`
+                                                        ? 1
+                                                        : 0.5
+                                            }}
+                                        >
+                                            <Text kind="body/regular/sm">VRAM</Text>
+                                            <Text kind="body/regular/sm">
+                                                {formatBytes(
+                                                    Math.floor(
+                                                        (gpu.vramTotal * gpu.vramUsage) / 100
+                                                    ),
+                                                    1
+                                                )}{' '}
+                                                / {gpu.vramFormatted}
+                                            </Text>
+                                        </Flex>
+                                    </Flex>
+                                )}
+                                {/* GPU temperature — a reading, not a chart series */}
+                                <Flex align="center" gap="2">
                                     <div
                                         className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
                                         style={{
-                                            backgroundColor: `${gpu.vramColor}BF`,
-                                            border: `2px solid ${gpu.vramColor}`,
+                                            backgroundColor: `${gpu.color}BF`,
+                                            border: `2px solid ${gpu.color}`,
                                             marginTop: '1px',
-                                            opacity:
-                                                selectedMetric === undefined ||
-                                                selectedMetric === `vram-${gpu.id}`
-                                                    ? 1
-                                                    : 0.3
+                                            opacity: isGpuSelected ? 1 : 0.3
                                         }}
                                     />
                                     <Flex
                                         align="center"
                                         gap="2"
                                         className="transition-opacity"
-                                        style={{
-                                            opacity:
-                                                selectedMetric === undefined ||
-                                                selectedMetric === `vram-${gpu.id}`
-                                                    ? 1
-                                                    : 0.5
-                                        }}
+                                        style={{ opacity: isGpuSelected ? 1 : 0.5 }}
                                     >
-                                        <Text kind="body/regular/sm">VRAM</Text>
+                                        <Text kind="body/regular/sm">Temp</Text>
                                         <Text kind="body/regular/sm">
-                                            {formatBytes(
-                                                Math.floor((gpu.vramTotal * gpu.vramUsage) / 100),
-                                                1
-                                            )}{' '}
-                                            / {gpu.vramFormatted}
+                                            {gpu.temperature > 0 ? `${gpu.temperature} °C` : '--'}
                                         </Text>
                                     </Flex>
                                 </Flex>
@@ -285,6 +315,9 @@ export default function NodePerformance({
                         <Text kind="body/regular/sm">
                             {Math.floor(hardwareInfo.cpuUtilization)}%{' '}
                             {hardwareInfo.cpuCores ? `(${hardwareInfo.cpuCores} cores)` : ''}
+                            {hardwareInfo.cpuTemperature > 0
+                                ? ` · ${hardwareInfo.cpuTemperature} °C`
+                                : ''}
                         </Text>
                     </Stack>
                 </Flex>

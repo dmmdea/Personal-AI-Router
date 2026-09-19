@@ -81,6 +81,10 @@ type statsCollector struct {
 	// the gasket/apex driver.
 	accels []*accelSampler
 
+	// cpuTemp is the sysfs file holding the CPU package temperature, resolved
+	// once at start (cputemp_linux.go); empty when the host exposes none.
+	cpuTemp cpuTempSource
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -101,6 +105,12 @@ func startStatsCollector() *statsCollector {
 	// than a spurious reading (with no previous sample, util reports 0).
 	c.prevCPU = readCPUTimes()
 	c.accels = startAccelSamplers(listApexDevices())
+	c.cpuTemp = findCPUTempSource()
+	if c.cpuTemp.path != "" {
+		slog.Info("CPU temperature source", "path", c.cpuTemp.path)
+	} else {
+		slog.Info("no CPU temperature source on this host; cpu.temperature_celsius will be omitted")
+	}
 	go c.run()
 	return c
 }
@@ -147,6 +157,9 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if used, ok := readMemoryUsed(); ok {
 		snap.MemUsedBytes = used
 	}
+	if t, ok := c.cpuTemp.read(); ok {
+		snap.CPUTempC = t
+	}
 
 	gpu := make(map[string]gpuStat)
 	sampledAt := time.Time{}
@@ -188,7 +201,7 @@ func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	if c.nvidiaUnavailable.Load() {
 		return false
 	}
-	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used")
+	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used,temperature.gpu")
 	if err != nil {
 		if c.nvidiaUnavailable.CompareAndSwap(false, true) {
 			slog.Warn("nvidia-smi unavailable; GPU utilization / dedicated VRAM-used will not be reported",
@@ -368,6 +381,13 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		}
 		if mib, err := strconv.ParseUint(fields[2], 10, 64); err == nil {
 			stat.VRAMUsed = mib * 1024 * 1024
+		}
+		// temperature.gpu is whole degrees Celsius; [N/A] (some virtual or
+		// headless SKUs) and a missing column leave it zero (omitted).
+		if len(fields) >= 4 {
+			if c, err := strconv.ParseUint(fields[3], 10, 32); err == nil {
+				stat.TemperatureC = uint32(c)
+			}
 		}
 		res[uuid] = stat
 	}

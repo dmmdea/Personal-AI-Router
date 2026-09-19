@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { create } from 'zustand'
-import type { NodeItemMetrics } from '@/shared/types/metrics'
+import type { GpuMetricValue, NodeItemMetrics } from '@/shared/types/metrics'
 import type { PerformanceMetric } from '@/ui/types/types'
 
 const MAX_DATA_POINTS = 60
@@ -17,6 +17,10 @@ export interface NodeMetricsHistory {
     gpuVramUsage: GpuMetricsHistory[]
     cpuUtilization: PerformanceMetric[]
     memoryUsage: PerformanceMetric[]
+    // Latest readings only (degrees Celsius; 0 = none reported) — shown as
+    // numbers next to the legend, not charted.
+    gpuTemperature: GpuMetricValue[]
+    cpuTemperature: number
 }
 
 interface MetricsStore {
@@ -78,7 +82,9 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
                             data: createPrefill(ts)
                         })),
                         cpuUtilization: createPrefill(ts),
-                        memoryUsage: createPrefill(ts)
+                        memoryUsage: createPrefill(ts),
+                        gpuTemperature: [],
+                        cpuTemperature: 0
                     }
                     map.set(metrics.id, history)
                 }
@@ -108,6 +114,8 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
 
                 pushMetric(history.cpuUtilization, metrics.current.cpuUtilization, ts)
                 pushMetric(history.memoryUsage, metrics.current.memoryUsage, ts)
+                history.gpuTemperature = metrics.current.gpuTemperature ?? []
+                history.cpuTemperature = metrics.current.cpuTemperature ?? 0
 
                 map.set(metrics.id, { ...history })
                 set({ generation: get().generation + 1 })

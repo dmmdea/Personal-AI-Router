@@ -471,6 +471,9 @@ type CPUInfo struct {
 	Name               string `json:"name,omitempty"`
 	Cores              uint32 `json:"cores,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// TemperatureCelsius is the CPU package temperature when the host exposes
+	// one (Linux hwmon); omitted where no driverless source exists.
+	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
 }
 
 type MemoryInfo struct {

@@ -45,6 +45,9 @@ type statsSnapshot struct {
 	// consumers can distinguish stale telemetry from freshly sampled data.
 	GPUSampledAt time.Time
 	CPUUtilPct   uint32
+	// CPUTempC is the CPU package temperature in whole degrees Celsius, zero
+	// when the host has no driverless source for it (see cputemp_linux.go).
+	CPUTempC     uint32
 	MemUsedBytes uint64
 }
 

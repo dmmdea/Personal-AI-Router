@@ -5,6 +5,10 @@ export interface GpuInfo {
     id: string
     name: string
     vramTotal: number // in bytes
+    // "npu" for a dedicated inference accelerator (Edge TPU / NPU) that
+    // node-info lists beside the GPUs; absent for a GPU. Accelerators have no
+    // VRAM figure, so the UI skips the VRAM row for them.
+    kind?: string
 }
 
 export interface StorageInfo {
