@@ -39,6 +39,11 @@ function NodeChartLegend({
                             CPU
                         </Text>
                         <Text kind="body/semibold/sm">{cpuFallbackInfo.usage}%</Text>
+                        {cpuFallbackInfo.temperature > 0 && (
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                {cpuFallbackInfo.temperature} °C
+                            </Text>
+                        )}
                     </Flex>
                 </Flex>
                 <Flex align="center" gap="2">
@@ -69,13 +74,26 @@ function NodeChartLegend({
                             <Text kind="body/semibold/sm">{gpu.usage}%</Text>
                         </Flex>
                     </Flex>
+                    {/* An accelerator (Edge TPU / NPU) has no VRAM figure; the row
+                        would only ever read "0 B / 0 B". */}
+                    {!(gpu.kind === 'npu' && gpu.vramTotal === 0) && (
+                        <Flex align="center" gap="2">
+                            <ColorDot color={gpu.vramColor} />
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                VRAM
+                            </Text>
+                            <Text kind="body/semibold/sm">
+                                {gpu.vramUsageFormatted} / {gpu.vramTotalFormatted}
+                            </Text>
+                        </Flex>
+                    )}
                     <Flex align="center" gap="2">
-                        <ColorDot color={gpu.vramColor} />
+                        <ColorDot color={gpu.usageColor} />
                         <Text kind="body/regular/sm" className="text-subtle-color">
-                            VRAM
+                            Temp
                         </Text>
                         <Text kind="body/semibold/sm">
-                            {gpu.vramUsageFormatted} / {gpu.vramTotalFormatted}
+                            {gpu.temperature > 0 ? `${gpu.temperature} °C` : '--'}
                         </Text>
                     </Flex>
                 </Stack>

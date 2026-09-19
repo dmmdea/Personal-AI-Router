@@ -134,18 +134,3 @@ func parseNvidiaStatic(out string) ([]GPUInfo, bool) {
 	}
 	return gpus, unifiedMemory
 }
-
-// splitCSVRow splits one nvidia-smi CSV row on commas and trims surrounding
-// whitespace from each field (the tool emits ", " separators). Returns nil for
-// a blank line so callers can skip it.
-func splitCSVRow(line string) []string {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return nil
-	}
-	parts := strings.Split(line, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	return parts
-}

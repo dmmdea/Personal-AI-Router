@@ -12,6 +12,12 @@ export interface NodeItemMetricsEntry {
     memoryUsage: number // percentage
     gpuUtilization: GpuMetricValue[] // percentage per GPU
     gpuVramUsage: GpuMetricValue[] // percentage per GPU
+    // Whole degrees Celsius. 0 = the node reports no reading for that device
+    // (node-info omits temperature_celsius where it has no driverless source);
+    // the UI shows "--" rather than a literal zero. Absent on frames from a
+    // backend that predates the field.
+    gpuTemperature?: GpuMetricValue[] // degrees per GPU
+    cpuTemperature?: number // degrees
 }
 
 export interface NodeItemMetrics {

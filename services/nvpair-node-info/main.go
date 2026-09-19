@@ -68,6 +68,9 @@ type CPUInfo struct {
 	Name               string `json:"name,omitempty"`
 	Cores              uint32 `json:"cores,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// TemperatureCelsius is the CPU package temperature (Linux: hwmon
+	// coretemp/k10temp, refreshed per tick); zero drops it from JSON.
+	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
 }
 
 // MemoryInfo is the node-level physical-RAM readout. TotalBytes is reported by
@@ -208,6 +211,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 	if cpuStatic != nil {
 		cpu := *cpuStatic
 		cpu.UtilizationPercent = snap.CPUUtilPct
+		cpu.TemperatureCelsius = snap.CPUTempC
 		resp.CPU = &cpu
 	}
 	if memTotal > 0 {
