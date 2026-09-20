@@ -17,6 +17,15 @@ import (
 type packageSensor interface {
 	// read returns the current package temperature in whole degrees.
 	read() (uint32, error)
+	// power returns the average package power in whole watts since the
+	// previous call, and false when there is none to give — no energy
+	// counter on this part, the first sample after an open, or a read that
+	// failed.
+	//
+	// It returns no error on purpose. Power is the secondary reading here;
+	// surfacing its failures as sensor faults would trip the sampler's
+	// reopen path and cost the host the temperature it came for.
+	power(now time.Time) (float64, bool)
 	// tjMax is the junction maximum the readouts are relative to.
 	tjMax() uint32
 	close()
@@ -76,6 +85,10 @@ type samplerState struct {
 	sensor   packageSensor
 	lastErr  string
 	failures int
+	// powerAnnounced keeps the "power readable" line to one per open. A part
+	// with no energy counter never logs it at all; intel_windows.go says why
+	// once, at open.
+	powerAnnounced bool
 
 	board         boardSensor
 	boardLastErr  string
@@ -160,6 +173,7 @@ func (s *sampler) tickCPU(st *samplerState) (*hostsensors.CPUReading, string, ti
 		}
 		st.sensor = opened
 		st.failures = 0
+		st.powerAnnounced = false
 		s.log.Info("CPU package sensor open", "source", sourceIntelMSR, "tjmax_celsius", st.sensor.tjMax())
 	}
 	c, err := st.sensor.read()
@@ -180,12 +194,27 @@ func (s *sampler) tickCPU(st *samplerState) (*hostsensors.CPUReading, string, ti
 		s.log.Info("CPU package sensor readable again")
 		st.lastErr = ""
 	}
-	return &hostsensors.CPUReading{
+	now := s.now()
+	reading := &hostsensors.CPUReading{
 		PackageCelsius: c,
 		TjMaxCelsius:   st.sensor.tjMax(),
 		Source:         sourceIntelMSR,
-		SampledAt:      s.now().UTC(),
-	}, "", s.interval
+		SampledAt:      now.UTC(),
+	}
+	// Power is sampled from the same open sensor, on the same tick, and
+	// stamped with the same SampledAt — so a reader applying one freshness
+	// window gets both readings or neither, and never a wattage from one
+	// tick beside a temperature from the next. A sample with no figure yet
+	// (the first after an open) simply leaves the field at zero, which the
+	// omitempty tag drops.
+	if watts, ok := st.sensor.power(now); ok {
+		reading.PackageWatts = watts
+		if !st.powerAnnounced {
+			s.log.Info("CPU package power readable", "watts", watts)
+			st.powerAnnounced = true
+		}
+	}
+	return reading, "", s.interval
 }
 
 // tickBoard samples the Super I/O chip, or returns nil when the host has

@@ -6,9 +6,11 @@
 package main
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,6 +33,10 @@ import (
 //   - VRAM used: mem_info_vram_used, plus mem_info_gtt_used on a unified part,
 //     matching the capacity rule so used never exceeds total.
 //   - temperature: the amdgpu hwmon's edge sensor (temp*_input, millidegrees).
+//   - power: the same hwmon's power1_input, the average socket power the SMU
+//     reports (labelled PPT — package power tracking). It is in microwatts,
+//     and on an APU it covers the whole package, CPU cores included, which is
+//     what "the GPU is drawing" means on a part with no separate rail.
 //
 // A host without amdgpu costs one os.ReadDir of /sys/class/drm per tick and
 // logs nothing at all; a host without /sys/class/drm logs a single Debug line
@@ -46,6 +52,19 @@ const amdHwmonName = "amdgpu"
 // expose "junction" (hotspot) and "mem", which read higher and would make an
 // AMD row look hot next to an NVIDIA one.
 const amdEdgeLabel = "edge"
+
+// amdPPTLabel is the power1_label value amdgpu gives its average socket power
+// input. The same hwmon may expose power2 ("PPT" instantaneous on some SKUs)
+// or none at all; an input labelled anything else is not the figure this row
+// wants, so the unlabelled fallback is power1 and nothing further.
+const amdPPTLabel = "ppt"
+
+// amdPowerInput is the hwmon attribute holding that reading, in microwatts,
+// and amdPowerLabel is the attribute naming it.
+const (
+	amdPowerInput = "power1_input"
+	amdPowerLabel = "power1_label"
+)
 
 // amdSampleAt folds one amdgpu sampling pass into the tick's GPU map and
 // reports the sample time the snapshot should carry. A usable utilization
@@ -81,6 +100,10 @@ func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
 		}
 		if temp, ok := amdEdgeTempC(c.deviceDir); ok {
 			stat.TemperatureC = temp
+			any = true
+		}
+		if watts, ok := amdPowerWatts(c.deviceDir); ok {
+			stat.PowerWatts = watts
 			any = true
 		}
 		if any {
@@ -145,6 +168,17 @@ func amdEdgeTempC(deviceDir string) (uint32, bool) {
 // "first sensor" fallback is deterministic across boots (hwmon numbering is
 // not).
 func amdTempSensors(deviceDir string) []amdTempSensor {
+	var sensors []amdTempSensor
+	for _, dir := range amdHwmonDirs(deviceDir) {
+		sensors = append(sensors, amdHwmonTempSensors(dir)...)
+	}
+	return sensors
+}
+
+// amdHwmonDirs lists a card's hwmon directories as full paths, amdgpu's own
+// first and the rest in name order, so every "first one wins" fallback below
+// is deterministic across boots — hwmon numbering is not.
+func amdHwmonDirs(deviceDir string) []string {
 	hwmonRoot := filepath.Join(deviceDir, "hwmon")
 	entries, err := os.ReadDir(hwmonRoot)
 	if err != nil {
@@ -159,11 +193,55 @@ func amdTempSensors(deviceDir string) []amdTempSensor {
 		return sysfsField(filepath.Join(hwmonRoot, dirs[i], "name")) == amdHwmonName &&
 			sysfsField(filepath.Join(hwmonRoot, dirs[j], "name")) != amdHwmonName
 	})
-	var sensors []amdTempSensor
+	paths := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
-		sensors = append(sensors, amdHwmonTempSensors(filepath.Join(hwmonRoot, dir))...)
+		paths = append(paths, filepath.Join(hwmonRoot, dir))
 	}
-	return sensors
+	return paths
+}
+
+// amdPowerWatts returns the card's socket power in whole watts, from the
+// amdgpu hwmon's power1_input (microwatts).
+//
+// The input labelled PPT wins wherever it sits; with no label at all power1 is
+// used, which is what amdgpu registers that attribute as. ok is false on a
+// card whose driver publishes no power attribute at all — several older
+// discrete parts, and any host where the read fails — so the row omits the
+// figure instead of reporting a card that draws nothing.
+//
+// On an APU this is package power: the CPU cores and the GPU share one socket
+// and one budget, and the SMU meters the socket. That is the honest answer for
+// the GPU row on such a part, not a defect — there is no separate GPU rail to
+// report.
+func amdPowerWatts(deviceDir string) (float64, bool) {
+	fallback := ""
+	for _, hwmonDir := range amdHwmonDirs(deviceDir) {
+		input := filepath.Join(hwmonDir, amdPowerInput)
+		if readSysfs(input) == "" {
+			continue
+		}
+		if strings.ToLower(sysfsField(filepath.Join(hwmonDir, amdPowerLabel))) == amdPPTLabel {
+			return microwattsToWatts(readSysfs(input))
+		}
+		if fallback == "" {
+			fallback = input
+		}
+	}
+	if fallback == "" {
+		return 0, false
+	}
+	return microwattsToWatts(readSysfs(fallback))
+}
+
+// microwattsToWatts converts one hwmon power attribute to whole watts. ok is
+// false for an unparseable or negative reading, which the driver uses for an
+// input it cannot currently sample.
+func microwattsToWatts(s string) (float64, bool) {
+	uw, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || uw < 0 {
+		return 0, false
+	}
+	return math.Round(float64(uw) / 1e6), true
 }
 
 // amdHwmonTempSensors lists one hwmon directory's temp<N>_input files in

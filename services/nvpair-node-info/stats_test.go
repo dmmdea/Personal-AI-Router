@@ -541,3 +541,94 @@ func TestBuildResponseCPUMemoryMatrix(t *testing.T) {
 		})
 	}
 }
+
+// TestParseWatts pins the decode both NVIDIA paths share. The rejections are
+// the point: [N/A] is what a card with no meter answers, and publishing 0 for
+// it would render as "this GPU is drawing no power".
+func TestParseWatts(t *testing.T) {
+	cases := []struct {
+		in    string
+		want  float64
+		wantO bool
+	}{
+		{in: "6.89", want: 7, wantO: true},
+		{in: " 35.65 ", want: 36, wantO: true},
+		{in: "210.55", want: 211, wantO: true},
+		{in: "0.00", want: 0, wantO: true},
+		{in: "[N/A]"},
+		{in: "N/A"},
+		{in: ""},
+		{in: "-1.0"},
+		{in: "NaN"},
+		{in: "+Inf"},
+	}
+	for _, c := range cases {
+		got, ok := parseWatts(c.in)
+		if got != c.want || ok != c.wantO {
+			t.Errorf("parseWatts(%q) = %v, %v; want %v, %v", c.in, got, ok, c.want, c.wantO)
+		}
+	}
+}
+
+// TestBuildResponseCarriesPower is the end-to-end assembly for the new field:
+// a metered GPU and a metered CPU publish whole watts, and every row nothing
+// metered publishes no power key at all.
+//
+// The absence half is the half worth testing. Most of a node's inventory has
+// no power meter — an integrated GPU, a Mali GPU, an RKNPU, an Edge TPU, the
+// board row — and a literal `"power_watts":0` on those rows would render as a
+// device drawing nothing rather than a device that cannot say.
+func TestBuildResponseCarriesPower(t *testing.T) {
+	static := []GPUInfo{
+		{Name: "Metered card", VramBytes: 16 << 30, statsKey: "luid_a"},
+		{Name: "Unmetered iGPU", VramBytes: 64 << 30, statsKey: "luid_b"},
+	}
+	snap := statsSnapshot{
+		GPU: map[string]gpuStat{
+			"luid_a": {UtilizationPct: 41, VRAMUsed: 2 << 30, TemperatureC: 38, PowerWatts: 210},
+			"luid_b": {UtilizationPct: 3},
+		},
+		GPUSampledAt:  time.Unix(1, 0),
+		CPUUtilPct:    12,
+		CPUTempC:      55,
+		CPUPowerWatts: 140,
+	}
+	typed, raw := buildResponseDecode(t, static, &CPUInfo{Name: "CPU", Cores: 18}, 0, snap)
+
+	if typed.GPUs[0].PowerWatts != 210 {
+		t.Errorf("metered GPU power_watts = %v, want 210", typed.GPUs[0].PowerWatts)
+	}
+	if typed.GPUs[1].PowerWatts != 0 {
+		t.Errorf("unmetered GPU power_watts = %v, want absent", typed.GPUs[1].PowerWatts)
+	}
+	if typed.CPU == nil || typed.CPU.PowerWatts != 140 {
+		t.Fatalf("cpu = %+v, want power_watts 140", typed.CPU)
+	}
+
+	gpus, _ := raw["GPUs"].([]any)
+	if len(gpus) != 2 {
+		t.Fatalf("GPUs = %v", raw["GPUs"])
+	}
+	metered, _ := gpus[0].(map[string]any)
+	if metered["power_watts"] != float64(210) {
+		t.Errorf("metered row power_watts = %v (%T), want the number 210", metered["power_watts"], metered["power_watts"])
+	}
+	unmetered, _ := gpus[1].(map[string]any)
+	if _, present := unmetered["power_watts"]; present {
+		t.Errorf("an unmetered row carries power_watts: %v", unmetered)
+	}
+	cpu, _ := raw["cpu"].(map[string]any)
+	if cpu["power_watts"] != float64(140) {
+		t.Errorf("cpu power_watts = %v, want 140", cpu["power_watts"])
+	}
+
+	// And a host with no energy counter at all — every Linux host where the
+	// powercap file is root-only — must publish a CPU object with no power
+	// key rather than a CPU claiming to draw nothing.
+	cold := statsSnapshot{CPUUtilPct: 4, CPUTempC: 51}
+	_, rawCold := buildResponseDecode(t, nil, &CPUInfo{Name: "CPU", Cores: 18}, 0, cold)
+	coldCPU, _ := rawCold["cpu"].(map[string]any)
+	if _, present := coldCPU["power_watts"]; present {
+		t.Errorf("a CPU with no energy counter carries power_watts: %v", coldCPU)
+	}
+}

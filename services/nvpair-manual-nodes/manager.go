@@ -55,6 +55,10 @@ type GPUInfo struct {
 	// as a bare capacity with no usage and gets rendered "0 B / 66 GB", which
 	// reads as an idle 66 GB of VRAM that does not exist.
 	MemoryPool string `json:"memory_pool,omitempty"`
+	// PowerWatts is carried through for the same reason: this struct is a
+	// re-marshal, so a metered device on a manually-added node would reach
+	// the UI with no wattage at all if the field stopped here.
+	PowerWatts float64 `json:"power_watts,omitempty"`
 }
 
 // CPUInfo and MemoryInfo mirror the top-level objects nvpair-node-info
@@ -66,6 +70,10 @@ type CPUInfo struct {
 	Name               string `json:"name,omitempty"`
 	Cores              uint32 `json:"cores,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// PowerWatts is the package power draw, carried through verbatim like
+	// GPUInfo.MemoryPool: a field this re-marshal drops is a field the broker
+	// and the UI never see for a manually-added node.
+	PowerWatts float64 `json:"power_watts,omitempty"`
 }
 
 type MemoryInfo struct {
@@ -729,7 +737,8 @@ func gpusEqual(a, b []GPUInfo) bool {
 			a[i].VramBytes != b[i].VramBytes ||
 			a[i].VramUsedBytes != b[i].VramUsedBytes ||
 			a[i].UtilizationPercent != b[i].UtilizationPercent ||
-			a[i].MemoryPool != b[i].MemoryPool {
+			a[i].MemoryPool != b[i].MemoryPool ||
+			a[i].PowerWatts != b[i].PowerWatts {
 			return false
 		}
 	}

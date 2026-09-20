@@ -444,6 +444,13 @@ type GPUInfo struct {
 	// TemperatureCelsius is the device's own thermal readout when the driver
 	// exposes one (accelerators do; GPUs leave it zero and it drops from JSON).
 	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+	// PowerWatts is what the device is drawing right now, in whole watts,
+	// when its driver meters itself: an NVIDIA GPU's power.draw and an AMD
+	// card's hwmon PPT input. Zero — and so absent — everywhere no meter
+	// exists: an integrated GPU, an Arm Mali GPU, an RKNPU, an Edge TPU, a
+	// Hailo module, the board row. A device that cannot be metered publishes
+	// nothing rather than a zero a client would render as "drawing no power".
+	PowerWatts float64 `json:"power_watts,omitempty"`
 	// MemoryPool says where VramBytes comes from. Empty — the historical
 	// default — means the capacity is the device's own dedicated memory.
 	// GPUMemoryPoolUnified means it is a pool the device shares with the host,
@@ -507,6 +514,13 @@ type CPUInfo struct {
 	// TemperatureCelsius is the CPU package temperature when the host exposes
 	// one (Linux hwmon); omitted where no driverless source exists.
 	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+	// PowerWatts is the package power draw in whole watts, derived from the
+	// processor's own energy counter (Linux: the powercap RAPL package
+	// domain; Windows: MSR_PKG_ENERGY_STATUS through the elevated sensor
+	// helper). Omitted wherever that counter is unreadable — which on a
+	// modern Linux kernel is the ordinary case for an unprivileged reader,
+	// because the counter is a side channel and the kernel keeps it 0400.
+	PowerWatts float64 `json:"power_watts,omitempty"`
 }
 
 type MemoryInfo struct {

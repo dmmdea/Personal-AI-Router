@@ -99,3 +99,75 @@ func TestDecodeBoundsTheRead(t *testing.T) {
 		t.Fatal("a report past MaxReportBytes must fail to decode, not be read whole")
 	}
 }
+
+// TestCPUPackageWattsFreshness applies the same window CPUPackage does, and
+// pins that the two readings are asked for independently: a helper on a part
+// whose energy counter it could not resolve publishes a temperature and no
+// wattage, and neither absence may take the other down.
+func TestCPUPackageWattsFreshness(t *testing.T) {
+	now := time.Date(2026, 9, 20, 16, 0, 0, 0, time.UTC)
+	fresh := Report{CPU: &CPUReading{PackageCelsius: 55, PackageWatts: 140, SampledAt: now.Add(-2 * time.Second)}}
+	if w, ok := fresh.CPUPackageWatts(now, 30*time.Second); !ok || w != 140 {
+		t.Fatalf("fresh: %v, %v; want 140, true", w, ok)
+	}
+
+	stale := Report{CPU: &CPUReading{PackageCelsius: 55, PackageWatts: 140, SampledAt: now.Add(-time.Hour)}}
+	if _, ok := stale.CPUPackageWatts(now, 30*time.Second); ok {
+		t.Error("a stale report published a wattage")
+	}
+	if _, ok := stale.CPUPackage(now, 30*time.Second); ok {
+		t.Error("a stale report published a temperature")
+	}
+
+	// Temperature without power: the CPU section is still fully usable.
+	tempOnly := Report{CPU: &CPUReading{PackageCelsius: 55, SampledAt: now}}
+	if _, ok := tempOnly.CPUPackageWatts(now, 30*time.Second); ok {
+		t.Error("a report with no wattage published one")
+	}
+	if c, ok := tempOnly.CPUPackage(now, 30*time.Second); !ok || c != 55 {
+		t.Errorf("temperature = %d, %v; want 55, true", c, ok)
+	}
+
+	if _, ok := (Report{}).CPUPackageWatts(now, 30*time.Second); ok {
+		t.Error("a report with no CPU section published a wattage")
+	}
+	// A future stamp is refused exactly as it is for the temperature.
+	ahead := Report{CPU: &CPUReading{PackageWatts: 140, SampledAt: now.Add(time.Hour)}}
+	if _, ok := ahead.CPUPackageWatts(now, 30*time.Second); ok {
+		t.Error("a report stamped in the future published a wattage")
+	}
+}
+
+// TestPackageWattsIsAdditiveOnTheWire: the field was added inside an existing
+// section, so an unmetered report must serialize exactly as it did before and
+// Schema must not move — a bumped schema would make every already-installed
+// reader refuse a report whose temperature it could still decode perfectly.
+func TestPackageWattsIsAdditiveOnTheWire(t *testing.T) {
+	if Schema != 1 {
+		t.Fatalf("Schema = %d; adding an optional field must not bump it", Schema)
+	}
+
+	var unmetered bytes.Buffer
+	if err := Encode(&unmetered, Report{CPU: &CPUReading{PackageCelsius: 55, Source: "intel-msr"}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(unmetered.String(), "package_watts") {
+		t.Fatalf("an unmetered report carries package_watts: %s", unmetered.String())
+	}
+
+	var metered bytes.Buffer
+	if err := Encode(&metered, Report{CPU: &CPUReading{PackageCelsius: 55, PackageWatts: 140, Source: "intel-msr"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(metered.String(), `"package_watts":140`) {
+		t.Fatalf("metered report missing package_watts: %s", metered.String())
+	}
+
+	back, err := Decode(&metered)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if back.CPU == nil || back.CPU.PackageWatts != 140 {
+		t.Fatalf("PackageWatts did not survive a round trip: %+v", back.CPU)
+	}
+}

@@ -34,6 +34,12 @@ import (
 //	--probe      read one report from the running service and print it; any
 //	             user, exit 0 with a CPU reading, 2 without one, 1 unreachable
 //	--once       read the sensor directly and print one report (elevation)
+
+// onceProbeInterval is how long --once waits between its two energy-counter
+// reads. It matches the service's default sampling interval, so the wattage a
+// one-shot prints is averaged over the same window the service publishes.
+const onceProbeInterval = 2 * time.Second
+
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	install := flag.Bool("install", false, "register this executable as the Windows service and start it (administrator)")
@@ -89,8 +95,17 @@ func main() {
 		if err != nil {
 			fail("%v", err)
 		}
+		// Package power is a derivative of an energy counter, so one read
+		// yields nothing. Prime the baseline, wait one interval, and read
+		// again — otherwise --once would print a report whose missing
+		// wattage says "this CPU has no energy counter" when it only means
+		// "you asked once".
+		s.power(time.Now())
+		time.Sleep(onceProbeInterval)
+		watts, _ := s.power(time.Now())
 		r := hostsensors.Report{HelperVersion: Version, CPU: &hostsensors.CPUReading{
-			PackageCelsius: c, TjMaxCelsius: s.tjMax(), Source: sourceIntelMSR, SampledAt: time.Now().UTC(),
+			PackageCelsius: c, PackageWatts: watts, TjMaxCelsius: s.tjMax(),
+			Source: sourceIntelMSR, SampledAt: time.Now().UTC(),
 		}}
 		// The board section is best-effort here exactly as it is in the
 		// service: a host without a supported Super I/O chip prints the CPU

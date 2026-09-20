@@ -20,9 +20,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Windows GPU temperature.
+// Windows GPU temperature and power draw.
 //
-// PDH has no temperature counter and DXGI reports none, so the only driverless
+// PDH has neither counter and DXGI reports neither, so the only driverless
 // source on an NVIDIA host is nvidia-smi, which keys its rows by PCI bus id.
 // The rest of the Windows collector keys GPUs by DXGI adapter LUID (the PDH
 // instance form). The bridge between the two is the kernel-mode display
@@ -34,10 +34,23 @@ import (
 // nvidia-smi is a process spawn (~100 ms), so it runs in its own goroutine on
 // a slow ticker rather than inside the 1 s PDH tick; the tick merges the
 // latest published map. A host without nvidia-smi (AMD / Intel / no NVIDIA
-// driver) latches unavailable on the first failure and reports no
-// temperature, exactly as before.
+// driver) latches unavailable on the first failure and reports neither
+// reading, exactly as before.
+//
+// Both readings ride the SAME query and the same PCI-address join, because
+// they come from the same rows: adding power.draw here costs no extra process
+// spawn and cannot drift from the temperature it is displayed beside.
 
 const gpuTempPollInterval = 5 * time.Second
+
+// gpuSensorSample is what one nvidia-smi row contributes to a GPU's dynamic
+// state — the two readings PDH and DXGI cannot supply. A zero field means the
+// card answered [N/A] (several virtual and headless SKUs do) and the matching
+// wire field is omitted rather than published as a literal zero.
+type gpuSensorSample struct {
+	TemperatureC uint32
+	PowerWatts   float64
+}
 
 var (
 	modGdi32                      = windows.NewLazySystemDLL("gdi32.dll")
@@ -155,25 +168,28 @@ func luidsByPCIAddress() map[string]string {
 	return out
 }
 
-// nvidiaSmiTemperatures runs nvidia-smi and returns PCI address -> degrees.
-func nvidiaSmiTemperatures() (map[string]uint32, error) {
+// nvidiaSmiSensors runs nvidia-smi and returns PCI address -> readings.
+func nvidiaSmiSensors() (map[string]gpuSensorSample, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nvidia-smi",
-		"--query-gpu=pci.bus_id,temperature.gpu",
+		"--query-gpu=pci.bus_id,temperature.gpu,power.draw",
 		"--format=csv,noheader,nounits")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	return parseNvidiaTemperatures(string(out)), nil
+	return parseNvidiaSensors(string(out)), nil
 }
 
-// parseNvidiaTemperatures decodes "pci.bus_id, temperature.gpu" rows. Rows
-// with an unparseable bus id or a non-numeric temperature ([N/A]) are skipped.
-func parseNvidiaTemperatures(out string) map[string]uint32 {
-	res := map[string]uint32{}
+// parseNvidiaSensors decodes "pci.bus_id, temperature.gpu, power.draw" rows.
+// A row with an unparseable bus id is skipped entirely; within a row each
+// reading is independent, so a card that answers [N/A] for one still
+// contributes the other. A row that yields neither is dropped rather than
+// stored as a pair of zeroes, which would read as a cold, idle card.
+func parseNvidiaSensors(out string) map[string]gpuSensorSample {
+	res := map[string]gpuSensorSample{}
 	for _, line := range strings.Split(out, "\n") {
 		fields := splitCSVRow(line)
 		if len(fields) < 2 {
@@ -183,23 +199,31 @@ func parseNvidiaTemperatures(out string) map[string]uint32 {
 		if key == "" {
 			continue
 		}
-		c, err := strconv.ParseUint(fields[1], 10, 32)
-		if err != nil {
+		var sample gpuSensorSample
+		if c, err := strconv.ParseUint(fields[1], 10, 32); err == nil {
+			sample.TemperatureC = uint32(c)
+		}
+		if len(fields) >= 3 {
+			if w, ok := parseWatts(fields[2]); ok {
+				sample.PowerWatts = w
+			}
+		}
+		if sample == (gpuSensorSample{}) {
 			continue
 		}
-		res[key] = uint32(c)
+		res[key] = sample
 	}
 	return res
 }
 
 // gpuTempPoller owns the slow nvidia-smi loop and publishes LUID key ->
-// degrees atomically for the PDH tick to merge.
+// readings atomically for the PDH tick to merge.
 type gpuTempPoller struct {
 	// byAddress maps PCI address -> LUID key. Resolved at start and re-resolved
 	// by poll() when a reading arrives for an address it does not know; only the
 	// poll goroutine ever touches it.
 	byAddress   map[string]string
-	latest      atomic.Pointer[map[string]uint32]
+	latest      atomic.Pointer[map[string]gpuSensorSample]
 	unavailable atomic.Bool
 	stop        chan struct{}
 	done        chan struct{}
@@ -233,7 +257,7 @@ func (p *gpuTempPoller) run() {
 	}
 }
 
-// poll reads nvidia-smi and republishes the LUID-keyed temperature map.
+// poll reads nvidia-smi and republishes the LUID-keyed reading map.
 //
 // byAddress is resolved once at start because LUIDs are fixed for the life of
 // a boot, but a reading can still arrive for an address it does not know: the
@@ -245,16 +269,16 @@ func (p *gpuTempPoller) poll() {
 	if p.unavailable.Load() {
 		return
 	}
-	temps, err := nvidiaSmiTemperatures()
+	sensors, err := nvidiaSmiSensors()
 	if err != nil {
 		if p.unavailable.CompareAndSwap(false, true) {
-			slog.Warn("nvidia-smi unavailable; GPU temperature will not be reported", "err", err)
+			slog.Warn("nvidia-smi unavailable; GPU temperature and power draw will not be reported", "err", err)
 		}
 		return
 	}
-	byLUID := make(map[string]uint32, len(temps))
+	byLUID := make(map[string]gpuSensorSample, len(sensors))
 	reResolved := false
-	for addr, c := range temps {
+	for addr, sample := range sensors {
 		luid, ok := p.byAddress[addr]
 		if !ok && !reResolved {
 			reResolved = true
@@ -262,30 +286,39 @@ func (p *gpuTempPoller) poll() {
 			luid, ok = p.byAddress[addr]
 		}
 		if ok {
-			byLUID[luid] = c
+			byLUID[luid] = sample
 		}
 	}
 	p.latest.Store(&byLUID)
 }
 
-// mergeInto adds the latest temperatures to the snapshot's GPU map under
-// their LUID keys, cloning the map first so a previously published snapshot
-// (which the stale-preserve path may alias) is never mutated.
+// mergeInto adds the latest readings to the snapshot's GPU map under their
+// LUID keys, cloning the map first so a previously published snapshot (which
+// the stale-preserve path may alias) is never mutated.
+//
+// Each field is copied only when the card reported it, so a row whose
+// temperature came through as [N/A] keeps whatever the rest of the collector
+// knows rather than having it overwritten with a zero.
 func (p *gpuTempPoller) mergeInto(snap *statsSnapshot) {
 	if p == nil {
 		return
 	}
-	temps := p.latest.Load()
-	if temps == nil || len(*temps) == 0 {
+	sensors := p.latest.Load()
+	if sensors == nil || len(*sensors) == 0 {
 		return
 	}
-	merged := make(map[string]gpuStat, len(snap.GPU)+len(*temps))
+	merged := make(map[string]gpuStat, len(snap.GPU)+len(*sensors))
 	for k, v := range snap.GPU {
 		merged[k] = v
 	}
-	for luid, c := range *temps {
+	for luid, sample := range *sensors {
 		s := merged[luid]
-		s.TemperatureC = c
+		if sample.TemperatureC > 0 {
+			s.TemperatureC = sample.TemperatureC
+		}
+		if sample.PowerWatts > 0 {
+			s.PowerWatts = sample.PowerWatts
+		}
 		merged[luid] = s
 	}
 	snap.GPU = merged
