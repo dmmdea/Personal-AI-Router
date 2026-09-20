@@ -102,9 +102,88 @@ The service no longer advertises itself over mDNS. Its parent (the broker) regis
 ## Platform Notes
 
 - **Windows** (first-class): GPU inventory comes from DXGI (vendor-agnostic, includes VRAM). Dynamic CPU / VRAM-used / utilization / memory-used numbers come from a persistent PDH query plus `GlobalMemoryStatusEx`. GPU temperature comes from `nvidia-smi` on a 5 s poller, joined to each DXGI adapter through the display driver's PCI address (`D3DKMTQueryAdapterInfo` / `KMTQAITYPE_ADAPTERADDRESS`), so two identical cards never swap readings; a host without `nvidia-smi` reports none. The CPU package temperature is polled every 5 s from the `nvpair-sensors` service's named pipe (`nvpair-shared/hostsensors`): the sensor is a model-specific register that only the elevated helper can read through PawnIO. A report older than 30 s is dropped, an absent helper is retried every 30 s, and in both cases `cpu.temperature_celsius` is omitted.
+- **Linux** (first-class): NVIDIA GPU inventory, dedicated VRAM usage, utilization and temperature come from `nvidia-smi`; CPU and system-memory usage come from `/proc`, the CPU package temperature from hwmon (`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`, else the `x86_pkg_temp` thermal zone). Unified-memory GPUs use the `/proc/meminfo` system-memory snapshot even when dynamic `nvidia-smi` collection is unavailable. AMD adapters are read from amdgpu's sysfs nodes (see [Linux AMD (amdgpu sysfs)](#linux-amd-amdgpu-sysfs) below) with full capacity, usage, utilization and temperature; any remaining non-NVIDIA adapter falls back to names from `ghw` without dynamic GPU stats. Inference accelerators behind the gasket/apex driver (Google Coral Edge TPU, `/sys/class/apex/*`) are listed with `kind:"npu"`; the driver keeps no busy counter, so `utilization_percent` is the fraction of 100 ms sub-intervals in the last second in which the device's `interrupt_counts` moved (the same "percent of time working" definition as `nvidia-smi`'s `utilization.gpu`, at coarser resolution), and `temperature_celsius` comes from its `temp` attribute.
+- **macOS**: CPU and system-memory usage come from Mach through gopsutil's purego bindings. GPU identity, mapped memory, and utilization come from the built-in, unprivileged `/usr/sbin/ioreg` command's `IOAccelerator` `PerformanceStatistics`; no sudo or private framework binding is required. Apple Silicon is supported directly. Intel/AMD fields are best-effort when their drivers expose the same dedicated-memory counters. The performance keys are undocumented and may change across macOS releases; a missing or changed key leaves only that metric out and does not stop CPU or memory collection.
+- **Other platforms**: GPU names come from `ghw`; VRAM and dynamic stats are not reported.
+
+### Windows inventory: stale DirectX registry at boot
+
+DXGI enumeration is filtered against the `AdapterLuid` values under `HKLM\SOFTWARE\Microsoft\DirectX`, which is how an RDP phantom clone of a card (same name, a second LUID) is kept out of the inventory. Windows reassigns adapter LUIDs on every boot but only rewrites those registry keys about a minute into the session, so a service that enumerates before that is matching this boot's LUIDs against the previous boot's: nothing matches, and the gate would drop every real adapter. That is not a state a machine with GPUs can be in, so an empty result is treated as proof the registry is stale — every adapter is kept and one warning is logged with the counts. When the gate keeps at least one adapter it still filters exactly as before.
+
+Detection also runs again after startup, on its own goroutine, never on the 1 s stats tick. While the inventory is empty it retries **every 10 s** until adapters appear; once at least one is known it re-detects **every 60 s** and republishes only when the set of adapters changed (a card hot-plugged after startup, or a clone a remote session brought in). Recovered adapters carry the same LUID key the PDH counters and the `nvidia-smi` temperature join use, so their VRAM, utilization and temperature fill in on the next tick; the temperature poller resolves an adapter address it has not seen before on demand. A node that came up with an empty GPU list therefore repairs itself instead of needing a restart.
+
+### Linux AMD (amdgpu sysfs)
+
+AMD ships no `nvidia-smi` equivalent in a default install, so a Radeon host used to fall through to `ghw` and publish the PCI database's codename and nothing else (`{"name":"Barcelo"}`). The amdgpu driver already exposes everything needed under `/sys/class/drm/card<N>/device/`, world-readable, so the inventory and the per-tick sample are plain file reads — no daemon, no root, no cgo, no new dependency.
+
+What is read, per card:
+
+| attribute | use |
+| --- | --- |
+| `vendor`, `device` | vendor `0x1002` selects the card; the device id picks the marketing name |
+| `uevent` (`PCI_SLOT_NAME`) | join-key fallback when the `device` symlink cannot be resolved |
+| `mem_info_vram_total` | dedicated VRAM, or an APU's firmware carve-out |
+| `mem_info_gtt_total` | the GTT aperture — system memory the GPU may map |
+| `mem_info_vram_used`, `mem_info_gtt_used` | `vram_used_bytes`, sampled every collector tick |
+| `gpu_busy_percent` | `utilization_percent`, already the 0..100 figure `nvidia-smi`'s `utilization.gpu` reports |
+| `hwmon/hwmon<N>/temp*_input` + `temp*_label` | `temperature_celsius`, in millidegrees, from the sensor labelled `edge` |
+
+Only `card<N>` directories are enumerated. The DRM class also carries one `card<N>-<CONNECTOR>` entry per output (`card1-DP-1`, `card1-HDMI-A-1`, …) and `renderD<N>` nodes, all pointing back at the same device; listing them would publish the same GPU several times.
+
+**Unified-pool capacity rule.** On an APU `mem_info_vram_total` is only the carve-out the firmware reserved — 512 MiB on a Ryzen 5 5625U — while the real ceiling for a model is that carve-out plus the GTT aperture. So:
+
+- **APU** (a device id in the built-in table, or `mem_info_vram_total` under 1 GiB alongside a `mem_info_gtt_total`): `vram_bytes = mem_info_vram_total + mem_info_gtt_total`, and `vram_used_bytes = mem_info_vram_used + mem_info_gtt_used`.
+- **Discrete card**: `vram_bytes = mem_info_vram_total` and `vram_used_bytes = mem_info_vram_used` — a discrete card also exposes a GTT aperture, and counting it would inflate a 16 GiB card to 24 GiB.
+
+Capacity and usage always come from the same side of that rule, so `vram_used_bytes` can never exceed `vram_bytes`. A unified AMD row is *not* the unified-memory NVIDIA case: that one substitutes whole-system RAM usage for a GPU whose driver cannot report its own, while amdgpu reports its own usage precisely and is always believed.
+
+**Join key.** Each row's internal `statsKey` is `amd:<pci address>` — `amd:0000:04:00.0` — taken from resolving the `device` symlink into `/sys/bus/pci/devices`, or from `uevent`'s `PCI_SLOT_NAME`, or, as a last resort, the DRM node name (`amd:card1`). The key never reaches the wire; it exists so the static row and the collector's sample meet. The `amd:<pci>` spelling matches the upstream amdgpu inventory work, so both implementations key identically.
+
+**Names.** A small table maps the device id to a marketing name (`0x15e7` → `AMD Radeon Graphics (Vega 7, Barcelo)`; Cezanne, Lucienne, Renoir, Picasso, Raven, Rembrandt, Phoenix and Strix are listed too). An unlisted id publishes `AMD Radeon Graphics (0x<id>)` — never a bare codename, and never a dropped row.
+
+**Ceilings and caveats.**
+
+- Requires the `amdgpu` kernel driver. The older `radeon` driver and pre-Vega parts expose none of these attributes; such a card keeps the `ghw` name-only behavior.
+- `gpu_busy_percent` is the driver's own coarse busy figure, not per-engine and not per-process, and a few ASICs do not export it at all. A missing or out-of-range value is dropped rather than published as `0`, so a driver that cannot answer never looks idle — and never marks the node's telemetry fresh.
+- The GTT half of an APU's capacity is an aperture the GPU may map, not memory reserved for it: the CPU is using most of it, and `memory.total_bytes` counts the same RAM. Treat an APU's `vram_bytes` as a ceiling, not as free memory.
+- `temperature_celsius` is the **edge** sensor. The same hwmon usually also exposes `junction` (hotspot) and `mem`, which read considerably hotter; edge is the closest analogue to `nvidia-smi`'s `temperature.gpu`, so rows stay comparable across vendors. With no labels at all, `temp1` is used.
+- Power (`power1_input`) and clocks are exposed by the same hwmon but are not part of this wire contract.
+- A host with no AMD card costs one `os.ReadDir` of `/sys/class/drm` per tick and logs nothing; a host without `/sys/class/drm` at all logs one `Debug` line for the process lifetime.
+
+- **Windows** (first-class): GPU inventory comes from DXGI (vendor-agnostic, includes VRAM). Dynamic CPU / VRAM-used / utilization / memory-used numbers come from a persistent PDH query plus `GlobalMemoryStatusEx`. GPU temperature comes from `nvidia-smi` on a 5 s poller, joined to each DXGI adapter through the display driver's PCI address (`D3DKMTQueryAdapterInfo` / `KMTQAITYPE_ADAPTERADDRESS`), so two identical cards never swap readings; a host without `nvidia-smi` reports none. The CPU package temperature is polled every 5 s from the `nvpair-sensors` service's named pipe (`nvpair-shared/hostsensors`): the sensor is a model-specific register that only the elevated helper can read through PawnIO. A report older than 30 s is dropped, an absent helper is retried every 30 s, and in both cases `cpu.temperature_celsius` is omitted. Hailo inference accelerators are listed with `kind:"npu"` and a temperature; see **Windows Hailo (HailoRT)** below.
 - **Linux** (first-class): NVIDIA GPU inventory, dedicated VRAM usage, utilization and temperature come from `nvidia-smi`; CPU and system-memory usage come from `/proc`, the CPU package temperature from hwmon (`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`, else the `x86_pkg_temp` thermal zone). Unified-memory GPUs use the `/proc/meminfo` system-memory snapshot even when dynamic `nvidia-smi` collection is unavailable. Non-NVIDIA adapters fall back to names from `ghw` without dynamic GPU stats. Inference accelerators behind the gasket/apex driver (Google Coral Edge TPU, `/sys/class/apex/*`) are listed with `kind:"npu"`; the driver keeps no busy counter, so `utilization_percent` is the fraction of 100 ms sub-intervals in the last second in which the device's `interrupt_counts` moved (the same "percent of time working" definition as `nvidia-smi`'s `utilization.gpu`, at coarser resolution), and `temperature_celsius` comes from its `temp` attribute.
 - **macOS**: CPU and system-memory usage come from Mach through gopsutil's purego bindings. GPU identity, mapped memory, and utilization come from the built-in, unprivileged `/usr/sbin/ioreg` command's `IOAccelerator` `PerformanceStatistics`; no sudo or private framework binding is required. Apple Silicon is supported directly. Intel/AMD fields are best-effort when their drivers expose the same dedicated-memory counters. The performance keys are undocumented and may change across macOS releases; a missing or changed key leaves only that metric out and does not stop CPU or memory collection.
 - **Other platforms**: GPU names come from `ghw`; VRAM and dynamic stats are not reported.
+
+### Windows Hailo (HailoRT)
+
+A Hailo M.2 module is not a display adapter, so DXGI never sees it. `nvpair-node-info` lists it in the same `GPUs` inventory with `kind:"npu"`, alongside the Edge TPU rows Linux produces, by calling HailoRT's C API (`libhailort.dll`) directly through `LazyDLL` — no cgo and no new dependency.
+
+**Where the library is looked for**, in order:
+
+1. `%HAILORT_DIR%\libhailort.dll` and `%HAILORT_DIR%\bin\libhailort.dll`
+2. `%HAILORT_ROOT%\libhailort.dll` and `%HAILORT_ROOT%\bin\libhailort.dll`
+3. `%ProgramFiles%\HailoRT\bin\libhailort.dll` (the installer's default)
+4. `libhailort.dll` through the loader's own search path
+
+**What is reported.** `hailo_scan_devices` yields one row per module, keyed by its PCIe BDF. The row's name comes from `hailo_identify`'s `device_architecture` (`HAILO8L` → "Hailo-8L AI Accelerator", and likewise for Hailo-8 / 15H / 15L / 15M / 10H); an architecture this build does not know is named "Hailo AI Accelerator" rather than dropped. A sampler goroutine per device then holds one open handle and reads `hailo_get_chip_temperature` every 5 s, publishing the hotter of the two on-die sensors (TS0/TS1) as `temperature_celsius`, rounded. A reading whose `sample_count` is 0 is discarded. Three consecutive failed reads drop the handle so the next tick reopens it — a handle does not survive a driver restart or a surprise removal, and every read on a dead one fails forever.
+
+**Ceilings on this platform. These are limits of HailoRT 4.24 on Windows, not gaps to work around:**
+
+- **No utilization.** HailoRT exposes no busy counter and its monitor mode is unsupported on Windows, so a Hailo row carries **no** `utilization_percent`. The field is omitted, never published as a literal `0`, which would read as "idle". (On Linux the gasket driver's `interrupt_counts` supports the figure for an Edge TPU; there is no equivalent here.)
+- **No power.** Power measurement is unsupported on the M.2 Hailo-8L module, so `hailo_power_measurement` is not called.
+- So the row is **presence + name + temperature**, and nothing else.
+
+**Without HailoRT installed**, a fitted module is still listed from the PnP enumerator (`HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1E60&DEV_*`), named from its PCI device id, with no temperature. That branch also retains an entry for a module that has since been removed, so the library scan — which talks to the hardware — is always preferred and the registry is read only when it is unavailable. A host with neither the library nor the device logs one Debug line and reports no accelerator, exactly as before.
+
+Like every accelerator row, a Hailo device never contributes to `telemetryValid` / `msSince` and is skipped by `noderec.MaxGPUUtilization`: it cannot run the engines PAIR schedules.
+
+A live check against real hardware ships with the tests and is skipped unless `NVPAIR_LIVE_HAILO=1` is set:
+
+```
+go test -c -o hailo_windows.test.exe
+NVPAIR_LIVE_HAILO=1 hailo_windows.test.exe -test.run TestLiveHailoAccelerator -test.v
+```
 
 ## Shutdown
 
