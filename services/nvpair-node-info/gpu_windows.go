@@ -15,6 +15,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+
+	"nvpair-shared/gpunames"
 )
 
 // detectGPUs enumerates display adapters via DXGI and reports each adapter's
@@ -143,6 +145,37 @@ func luidUint64(low uint32, high int32) uint64 {
 	return uint64(uint32(high))<<32 | uint64(low)
 }
 
+// adapterName is the name a DXGI adapter is published under.
+//
+// DXGI's Description is the display driver's INF string, and for an Intel or
+// AMD integrated GPU that string is both vague and inconsistent: a Tiger Lake
+// laptop enumerates as "Intel(R) UHD Graphics" — no model, no generation —
+// while a Coffee Lake desktop enumerates as "Intel(R) UHD Graphics 630". The
+// Linux rows for those same parts have carried "<marketing name> (<codename>,
+// <architecture>)" since the sysfs inventories landed, from a table keyed by
+// PCI device id. DXGI hands us that same device id in the same struct, so the
+// two platforms can and now do agree.
+//
+// The DXGI string is never discarded on a guess: an id the table does not
+// know keeps it, which makes this strictly additive. NVIDIA is left alone
+// entirely — nvidia-smi and the NVIDIA INF already name a card precisely
+// ("NVIDIA GeForce RTX 5080"), and there is no generation this could add that
+// the model number does not already imply.
+func adapterName(desc *dxgiAdapterDesc1) string {
+	description := windows.UTF16ToString(desc.Description[:])
+	switch desc.VendorID {
+	case gpunames.PCIVendorIntel:
+		if name, ok := gpunames.Intel(desc.DeviceID); ok {
+			return name
+		}
+	case gpunames.PCIVendorAMD:
+		if name, ok := gpunames.AMD(desc.DeviceID); ok {
+			return name
+		}
+	}
+	return description
+}
+
 // virtualDisplayNameFragments are case-insensitive substrings that mark
 // Microsoft remoting / virtual display adapters. These are real WDDM
 // adapters (not DXGI_ADAPTER_FLAG_SOFTWARE) so the SOFTWARE skip alone
@@ -218,11 +251,21 @@ func keepPhysicalAdapter(luid uint64, physical map[uint64]struct{}) bool {
 // its two consumers need: the packed QWORD the DirectX registry gate is keyed
 // by, and the DWORD halves D3DKMT takes when the temperature join resolves a
 // PCI address (gputemp_windows.go).
+// The PCI vendor/device pair is carried alongside because it is what
+// adapterName resolved the published name from, and the live hardware test
+// has no other way to tell a renamed row from a passed-through one.
 type adapterCandidate struct {
 	gpu      GPUInfo
 	luid     uint64
 	luidLow  uint32
 	luidHigh int32
+	vendorID uint32
+	deviceID uint32
+
+	// dxgiDescription is the adapter Description exactly as DXGI reported it,
+	// kept so a row whose name came from the shared table can still be traced
+	// back to the driver string it replaced.
+	dxgiDescription string
 }
 
 // One-shot warning latches. Adapter detection now re-runs on a timer
@@ -343,10 +386,19 @@ func enumerateAdapterCandidates() []adapterCandidate {
 			continue
 		}
 
-		name := windows.UTF16ToString(desc.Description[:])
-		if isVirtualDisplayAdapter(name) {
-			slog.Debug("skipping virtual/remote display adapter", "name", name)
+		// The virtual/remote-display denylist matches on DXGI's own string,
+		// so it is applied before adapterName may replace it with a table one.
+		description := windows.UTF16ToString(desc.Description[:])
+		if isVirtualDisplayAdapter(description) {
+			slog.Debug("skipping virtual/remote display adapter", "name", description)
 			continue
+		}
+		name := adapterName(&desc)
+		if name != description {
+			slog.Debug("naming adapter from the shared PCI id table",
+				"dxgi_description", description, "name", name,
+				"vendor_id", fmt.Sprintf("0x%04x", desc.VendorID),
+				"device_id", fmt.Sprintf("0x%04x", desc.DeviceID))
 		}
 
 		candidates = append(candidates, adapterCandidate{
@@ -355,9 +407,12 @@ func enumerateAdapterCandidates() []adapterCandidate {
 				VramBytes: uint64(desc.DedicatedVideoMemory),
 				statsKey:  luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh),
 			},
-			luid:     luidUint64(desc.AdapterLuidLow, desc.AdapterLuidHigh),
-			luidLow:  desc.AdapterLuidLow,
-			luidHigh: desc.AdapterLuidHigh,
+			luid:            luidUint64(desc.AdapterLuidLow, desc.AdapterLuidHigh),
+			luidLow:         desc.AdapterLuidLow,
+			luidHigh:        desc.AdapterLuidHigh,
+			vendorID:        desc.VendorID,
+			deviceID:        desc.DeviceID,
+			dxgiDescription: description,
 		})
 	}
 	return candidates
