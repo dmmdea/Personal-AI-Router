@@ -94,7 +94,7 @@ func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
 // the attribute is documented as 0..100 and anything else means we are not
 // reading what we think we are.
 func amdBusyPercent(deviceDir string) (uint32, bool) {
-	pct, ok := amdSysfsUint(deviceDir, "gpu_busy_percent")
+	pct, ok := drmSysfsUint(deviceDir, "gpu_busy_percent")
 	if !ok || pct > 100 {
 		return 0, false
 	}
@@ -105,12 +105,12 @@ func amdBusyPercent(deviceDir string) (uint32, bool) {
 // GTT the driver has mapped when the row's capacity included the GTT
 // aperture. ok is false when the driver reports no VRAM usage at all.
 func amdUsedBytes(c amdCard) (uint64, bool) {
-	used, ok := amdSysfsUint(c.deviceDir, "mem_info_vram_used")
+	used, ok := drmSysfsUint(c.deviceDir, "mem_info_vram_used")
 	if !ok {
 		return 0, false
 	}
 	if c.unifiedPool {
-		if gtt, okGTT := amdSysfsUint(c.deviceDir, "mem_info_gtt_used"); okGTT {
+		if gtt, okGTT := drmSysfsUint(c.deviceDir, "mem_info_gtt_used"); okGTT {
 			used += gtt
 		}
 	}

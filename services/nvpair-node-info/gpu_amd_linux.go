@@ -76,22 +76,94 @@ type amdModel struct {
 	apu  bool
 }
 
-// amdModels maps a PCI device id (lowercase hex, no "0x") to its marketing
-// name. It exists because the codename sysfs and the PCI database report
-// ("Barcelo", "Cezanne") is not something a user can match to their machine.
+// amdFallbackName is the vendor-level name every AMD row starts from, and the
+// whole name for a card whose device id sysfs could not read.
+const amdFallbackName = "AMD Radeon Graphics"
+
+// amdModels maps a PCI device id (lowercase hex, no "0x") to the name this
+// service publishes. Every entry renders as
+//
+//	<marketing name> (<codename>, <architecture>)
+//
+// The codename alone - which is all ghw and the PCI database report - tells a
+// user nothing: "Barcelo" names neither the vendor nor the generation. The
+// marketing name alone is barely better, because AMD has reused "AMD Radeon
+// Graphics" across five architectures. The architecture is the part an
+// operator actually reasons about when deciding what a node can run, so it is
+// in the name rather than implied by a codename nobody memorizes.
+//
+// The shader-core (CU) count is deliberately absent. It is NOT derivable from
+// the device id: 0x15e7 (Barcelo) alone ships as Vega 6, Vega 7 and Vega 8
+// depending on the SKU's fused core count, and libdrm's amdgpu.ids needs the
+// PCI *revision* id on top of the device id to tell those apart. The previous
+// table printed "Vega 7" for every 0x15e7, which was a guess.
+//
+// Every id below was checked against three sources rather than recalled:
+// the kernel's amdgpu PCI table (drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c),
+// the PCI ID Repository's pci.ids, and libdrm's data/amdgpu.ids (which is
+// where the marketing names come from). Three ids that are easy to transpose
+// are called out because they were: 0x1900 is Hawk Point (Radeon 780M, RDNA 3)
+// and NOT Strix Point, 0x150e is Strix Point (Radeon 890M) and NOT Strix Halo,
+// and 0x1586 is Strix Halo (Radeon 8060S).
+//
 // An unlisted id still produces a row - see amdModelName - so a part released
 // after this table was written is never dropped from the inventory.
 var amdModels = map[string]amdModel{
-	"15e7": {"AMD Radeon Graphics (Vega 7, Barcelo)", true},
-	"1638": {"AMD Radeon Graphics (Cezanne)", true},
-	"164c": {"AMD Radeon Graphics (Lucienne)", true},
-	"1636": {"AMD Radeon Graphics (Renoir)", true},
-	"15d8": {"AMD Radeon Graphics (Picasso)", true},
-	"15dd": {"AMD Radeon Graphics (Raven)", true},
-	"1681": {"AMD Radeon Graphics (Rembrandt)", true},
-	"15bf": {"AMD Radeon Graphics (Phoenix)", true},
-	"15c8": {"AMD Radeon Graphics (Phoenix2)", true},
-	"150e": {"AMD Radeon Graphics (Strix)", true},
+	// GCN 5 (Vega, gfx900/902/909): the first Ryzen APUs.
+	"15dd": {"AMD Radeon Vega Graphics (Raven Ridge, GCN 5)", true},
+	"15d8": {"AMD Radeon Vega Graphics (Picasso, GCN 5)", true},
+
+	// GCN 5.1 (gfx90c): Renoir and its three rebadges share one shader ISA.
+	"1636": {"AMD Radeon Vega Graphics (Renoir, GCN 5.1)", true},
+	"164c": {"AMD Radeon Vega Graphics (Lucienne, GCN 5.1)", true},
+	"1638": {"AMD Radeon Vega Graphics (Cezanne, GCN 5.1)", true},
+	"15e7": {"AMD Radeon Vega Graphics (Barcelo, GCN 5.1)", true},
+
+	// RDNA 2 (gfx103x).
+	"164e": {"AMD Radeon Graphics (Raphael, RDNA 2)", true},
+	"1681": {"AMD Radeon 680M (Rembrandt, RDNA 2)", true},
+
+	// RDNA 3 (gfx1103).
+	"15bf": {"AMD Radeon 780M (Phoenix, RDNA 3)", true},
+	"15c8": {"AMD Radeon 740M (Phoenix2, RDNA 3)", true},
+	"1900": {"AMD Radeon 780M (Hawk Point, RDNA 3)", true},
+
+	// RDNA 3.5 (gfx115x).
+	"150e": {"AMD Radeon 890M (Strix Point, RDNA 3.5)", true},
+	"1586": {"AMD Radeon 8060S (Strix Halo, RDNA 3.5)", true},
+	"1114": {"AMD Radeon 860M (Krackan Point, RDNA 3.5)", true},
+}
+
+// amdGCIPPath is where amdgpu publishes the Graphics Core IP version it read
+// out of the ASIC's own IP discovery table, relative to a card's device
+// directory. Present on Renoir and every later part (measured: GC 9.3.0 on a
+// Barcelo APU, which is gfx90c).
+const amdGCIPPath = "ip_discovery/die/0/GC/0"
+
+// amdGCArchitectures maps a Graphics Core IP {major, minor} to the
+// architecture family AMD markets it as. It exists so a part released after
+// amdModels was written still names its generation instead of showing a bare
+// device id.
+//
+// The revision component is deliberately not part of the key: it separates
+// steppings inside one family (9.3.0 and a later 9.3.x are both gfx90c), not
+// families.
+//
+// GC 9.4.x (Arcturus / Aldebaran / MI300) and 9.5.x (MI350) are deliberately
+// absent. They are the data-center CDNA line, not GCN 5.x, so the "9.x is
+// GCN 5.x" shorthand would publish a wrong architecture on exactly the cards
+// an operator would care most about. An unmapped version drops the
+// architecture from the name rather than inventing one.
+var amdGCArchitectures = map[[2]uint64]string{
+	{9, 0}:  "GCN 5",
+	{9, 1}:  "GCN 5",
+	{9, 2}:  "GCN 5",
+	{9, 3}:  "GCN 5.1",
+	{10, 1}: "RDNA",
+	{10, 3}: "RDNA 2",
+	{11, 0}: "RDNA 3",
+	{11, 5}: "RDNA 3.5",
+	{12, 0}: "RDNA 4",
 }
 
 // amdCard is one enumerated AMD adapter: where its attributes live, what it
@@ -126,24 +198,12 @@ func detectAMDGPUs(drmRoot string) []GPUInfo {
 	var out []GPUInfo
 	for _, c := range listAMDCards(drmRoot) {
 		out = append(out, GPUInfo{
-			Name:      amdModelName(c.deviceID),
+			Name:      amdModelName(c.deviceID, c.deviceDir),
 			VramBytes: amdCapacityBytes(c),
 			statsKey:  c.statsKey,
 		})
 	}
 	return out
-}
-
-// detectAMDOrGHWGPUs is the inventory path for a host where nvidia-smi
-// produced nothing. amdgpu's sysfs nodes carry a name, a real capacity and a
-// join key, so they supersede the ghw adapter list whenever any AMD card is
-// present; a host with no AMD card keeps the previous ghw behavior (names
-// only, no dynamic stats).
-func detectAMDOrGHWGPUs() []GPUInfo {
-	if amd := detectAMDGPUs(drmClassDir); len(amd) > 0 {
-		return amd
-	}
-	return detectGPUsGHW()
 }
 
 // listAMDCards enumerates the AMD adapters under drmRoot. Only card<N>
@@ -162,7 +222,7 @@ func listAMDCards(drmRoot string) []amdCard {
 	}
 	var cards []amdCard
 	for _, e := range entries {
-		index, ok := amdCardIndex(e.Name())
+		index, ok := drmCardIndex(e.Name())
 		if !ok {
 			continue
 		}
@@ -177,16 +237,16 @@ func listAMDCards(drmRoot string) []amdCard {
 			deviceID:  amdDeviceID(deviceDir),
 		}
 		c.unifiedPool = amdUnifiedPool(c)
-		c.statsKey = amdStatsKey(deviceDir, e.Name())
+		c.statsKey = drmPCIStatsKey(amdStatsKeyPrefix, deviceDir, e.Name())
 		cards = append(cards, c)
 	}
 	sort.Slice(cards, func(i, j int) bool { return cards[i].index < cards[j].index })
 	return cards
 }
 
-// amdCardIndex reports the N of a "card<N>" DRM node name. It rejects the
+// drmCardIndex reports the N of a "card<N>" DRM node name. It rejects the
 // connector directories ("card1-DP-1") and every other class entry.
-func amdCardIndex(name string) (int, bool) {
+func drmCardIndex(name string) (int, bool) {
 	digits, ok := strings.CutPrefix(name, "card")
 	if !ok || digits == "" {
 		return 0, false
@@ -208,17 +268,48 @@ func amdDeviceID(deviceDir string) string {
 	return id
 }
 
-// amdModelName resolves a device id to a display name. An unknown id keeps the
-// id in the name rather than being dropped or published as a bare codename,
-// which is meaningless to a user reading a node list.
-func amdModelName(deviceID string) string {
+// amdModelName resolves a card to its display name. A listed id gets the
+// table's full "<marketing name> (<codename>, <architecture>)" string.
+//
+// An unlisted id - a part released after amdModels was written - is never
+// dropped and never published as a bare codename. It keeps its device id so
+// the card is still identifiable, and it gains the architecture family
+// whenever the driver's IP discovery table can supply one, which is the whole
+// point of reading it: a node listing "AMD Radeon Graphics (device 0x1114,
+// RDNA 3.5)" is useful on day one of a new part, where "Krackan" is not.
+func amdModelName(deviceID, deviceDir string) string {
 	if m, ok := amdModels[deviceID]; ok {
 		return m.name
 	}
 	if deviceID == "" {
-		return "AMD Radeon Graphics"
+		return amdFallbackName
 	}
-	return "AMD Radeon Graphics (0x" + deviceID + ")"
+	if arch, ok := amdGCArchitecture(deviceDir); ok {
+		return amdFallbackName + " (device 0x" + deviceID + ", " + arch + ")"
+	}
+	return amdFallbackName + " (device 0x" + deviceID + ")"
+}
+
+// amdGCArchitecture reads the card's Graphics Core IP version out of amdgpu's
+// ip_discovery tree and maps it to an architecture family. ok is false when
+// the tree is absent (every pre-Renoir part), unreadable, or carries a version
+// amdGCArchitectures deliberately does not name - in all three cases the
+// caller omits the architecture rather than guessing one.
+func amdGCArchitecture(deviceDir string) (string, bool) {
+	if deviceDir == "" {
+		return "", false
+	}
+	major, haveMajor := drmSysfsUint(deviceDir, filepath.Join(amdGCIPPath, "major"))
+	minor, haveMinor := drmSysfsUint(deviceDir, filepath.Join(amdGCIPPath, "minor"))
+	if !haveMajor || !haveMinor {
+		return "", false
+	}
+	revision, _ := drmSysfsUint(deviceDir, filepath.Join(amdGCIPPath, "revision"))
+	arch, ok := amdGCArchitectures[[2]uint64{major, minor}]
+	slog.Debug("amdgpu GC IP version",
+		"device_dir", deviceDir, "major", major, "minor", minor, "revision", revision,
+		"architecture", arch, "named", ok)
+	return arch, ok
 }
 
 // amdUnifiedPool reports whether this card's usable memory is the VRAM
@@ -229,8 +320,8 @@ func amdUnifiedPool(c amdCard) bool {
 	if m, ok := amdModels[c.deviceID]; ok {
 		return m.apu
 	}
-	vram, haveVRAM := amdSysfsUint(c.deviceDir, "mem_info_vram_total")
-	_, haveGTT := amdSysfsUint(c.deviceDir, "mem_info_gtt_total")
+	vram, haveVRAM := drmSysfsUint(c.deviceDir, "mem_info_vram_total")
+	_, haveGTT := drmSysfsUint(c.deviceDir, "mem_info_gtt_total")
 	return haveVRAM && haveGTT && vram < amdAPUVRAMCeiling
 }
 
@@ -238,31 +329,33 @@ func amdUnifiedPool(c amdCard) bool {
 // unified part, dedicated VRAM on a discrete card. Zero when the driver
 // reports neither, which omitempty then drops from the wire.
 func amdCapacityBytes(c amdCard) uint64 {
-	vram, _ := amdSysfsUint(c.deviceDir, "mem_info_vram_total")
+	vram, _ := drmSysfsUint(c.deviceDir, "mem_info_vram_total")
 	if !c.unifiedPool {
 		return vram
 	}
-	gtt, _ := amdSysfsUint(c.deviceDir, "mem_info_gtt_total")
+	gtt, _ := drmSysfsUint(c.deviceDir, "mem_info_gtt_total")
 	return vram + gtt
 }
 
-// amdStatsKey builds the "amd:<pci address>" join key. The class entry's
-// `device` is a symlink into /sys/bus/pci/devices, so the resolved directory
-// name is the address; uevent's PCI_SLOT_NAME is the fallback for a sysfs view
-// where the link cannot be resolved, and the DRM node name is the last resort
-// so a card is never published without a key (which would cost it every
-// dynamic field). Both the inventory and the sampler call this, so they always
-// agree.
-func amdStatsKey(deviceDir, card string) string {
+// drmPCIStatsKey builds a "<prefix><pci address>" join key for a DRM card.
+// The class entry's `device` is a symlink into /sys/bus/pci/devices, so the
+// resolved directory name is the address; uevent's PCI_SLOT_NAME is the
+// fallback for a sysfs view where the link cannot be resolved, and the DRM
+// node name is the last resort so a card is never published without a key
+// (which would cost it every dynamic field).
+//
+// Shared by the amdgpu ("amd:") and Intel ("intel:") inventories and by their
+// samplers, so a row and its samples can never key differently.
+func drmPCIStatsKey(prefix, deviceDir, card string) string {
 	if resolved, err := filepath.EvalSymlinks(deviceDir); err == nil {
 		if base := filepath.Base(resolved); isPCIAddress(base) {
-			return amdStatsKeyPrefix + base
+			return prefix + base
 		}
 	}
 	if slot := ueventValue(readSysfs(filepath.Join(deviceDir, "uevent")), "PCI_SLOT_NAME"); isPCIAddress(slot) {
-		return amdStatsKeyPrefix + slot
+		return prefix + slot
 	}
-	return amdStatsKeyPrefix + card
+	return prefix + card
 }
 
 // ueventValue pulls one KEY=value line out of a sysfs uevent file.
@@ -316,10 +409,10 @@ func sysfsField(path string) string {
 	return strings.TrimSpace(readSysfs(path))
 }
 
-// amdSysfsUint reads a decimal unsigned attribute from a card's device
+// drmSysfsUint reads a decimal unsigned attribute from a card's device
 // directory. ok is false when the file is missing, empty or not a number, so
 // callers can tell "zero" from "unknown".
-func amdSysfsUint(deviceDir, attr string) (uint64, bool) {
+func drmSysfsUint(deviceDir, attr string) (uint64, bool) {
 	v, err := strconv.ParseUint(sysfsField(filepath.Join(deviceDir, attr)), 10, 64)
 	if err != nil {
 		return 0, false

@@ -22,38 +22,82 @@ import (
 // collector from blocking indefinitely.
 const nvidiaSmiTimeout = 3 * time.Second
 
-// detectGPUs enumerates GPUs on Linux. It prefers nvidia-smi, which yields the
-// marketing name, total VRAM, and a stable per-GPU UUID we reuse as the join
-// key (statsKey) against the dynamic stats collector's snapshot. When
-// nvidia-smi is absent — no NVIDIA driver, or an AMD/Intel-only host — it tries
-// the Rockchip SoC detectors (gpu_rockchip_linux.go: a Mali GPU and an RKNPU,
-// neither of which is a PCI adapter), then amdgpu's own sysfs inventory
-// (gpu_amd_linux.go), and finally falls back to ghw, which reports adapter
-// names but no VRAM and no join key, so those hosts list their GPUs without
-// dynamic VRAM/utilization (matching the pre-existing non-Windows behavior).
+// detectGPUs enumerates every GPU on Linux, from every vendor present, into
+// one inventory.
+//
+// Each vendor has its own source, and each source is authoritative only for
+// its own hardware: nvidia-smi for NVIDIA (marketing name, total VRAM, and a
+// stable per-GPU UUID reused as the join key against the stats collector's
+// snapshot), the Rockchip SoC detectors for a Mali GPU and an RKNPU (platform
+// devices, not PCI adapters), amdgpu's sysfs nodes for Radeon, and i915/xe's
+// sysfs nodes for Intel.
+//
+// The detectors are *composed*, not raced. Until this change the chain
+// returned at the first source that produced anything, so a node with a
+// discrete card and an integrated one published only the discrete card: an
+// NVIDIA + Intel UHD 630 host listed one GPU and silently dropped the iGPU,
+// and the same early return hid an AMD iGPU behind an NVIDIA card. A machine
+// really does have both, and a node list that omits one is wrong about what
+// the machine is.
+//
+// ghw stays the last resort and only when nothing else found anything at all:
+// it reports adapter names with no VRAM and no join key, so those hosts list
+// their GPUs without dynamic VRAM/utilization (the pre-existing non-Windows
+// behavior). It must not run alongside the vendor detectors, because it would
+// list the very same PCI adapters a second time under worse names.
 //
 // On unified-memory architectures (UMA, e.g. Grace-Blackwell / DGX Spark)
 // nvidia-smi reports [N/A] for memory.total because the GPU shares system
 // DRAM; in that case VramBytes is filled from detectMemoryTotal() instead.
 func detectGPUs() []GPUInfo {
-	if out, err := nvidiaSmiCSV("uuid,name,memory.total"); err == nil {
-		if gpus, uma := parseNvidiaStatic(out); len(gpus) > 0 {
-			if uma {
-				if total := detectMemoryTotal(); total > 0 {
-					for i := range gpus {
-						if gpus[i].usesSystemMemoryUsage {
-							gpus[i].VramBytes = total
-						}
-					}
-				}
-			}
-			return gpus
+	return composeLinuxGPUs(
+		detectNvidiaGPUs(),
+		detectRockchipDevices(),
+		detectAMDGPUs(drmClassDir),
+		detectIntelGPUs(drmClassDir),
+		detectGPUsGHW,
+	)
+}
+
+// composeLinuxGPUs concatenates the per-vendor inventories in a fixed order —
+// nvidia, rockchip, amd, intel — so a node's GPU list is stable across
+// restarts and the discrete card a scheduler cares about stays first on the
+// hosts that have one. ghw is called only when every vendor detector came back
+// empty, which is why it is passed as a function rather than a slice.
+func composeLinuxGPUs(nvidia, rockchip, amd, intel []GPUInfo, ghw func() []GPUInfo) []GPUInfo {
+	gpus := make([]GPUInfo, 0, len(nvidia)+len(rockchip)+len(amd)+len(intel))
+	gpus = append(gpus, nvidia...)
+	gpus = append(gpus, rockchip...)
+	gpus = append(gpus, amd...)
+	gpus = append(gpus, intel...)
+	if len(gpus) == 0 {
+		return ghw()
+	}
+	return gpus
+}
+
+// detectNvidiaGPUs is the nvidia-smi half of the inventory, split out so the
+// composition above reads as one list of peers. A missing binary (no NVIDIA
+// driver) returns nil, which is not an error on an AMD/Intel-only host.
+func detectNvidiaGPUs() []GPUInfo {
+	out, err := nvidiaSmiCSV("uuid,name,memory.total")
+	if err != nil {
+		return nil
+	}
+	gpus, uma := parseNvidiaStatic(out)
+	if len(gpus) == 0 || !uma {
+		return gpus
+	}
+	total := detectMemoryTotal()
+	if total == 0 {
+		return gpus
+	}
+	for i := range gpus {
+		if gpus[i].usesSystemMemoryUsage {
+			gpus[i].VramBytes = total
 		}
 	}
-	if rockchip := detectRockchipDevices(); len(rockchip) > 0 {
-		return rockchip
-	}
-	return detectAMDOrGHWGPUs()
+	return gpus
 }
 
 // detectGPUsGHW is the ghw-based fallback, identical in spirit to the
