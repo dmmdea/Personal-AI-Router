@@ -27,8 +27,8 @@ const cpuVendorIntel = "GenuineIntel"
 // IA32_PACKAGE_THERM_STATUS per sample. Package registers read the same from
 // every core, so no thread affinity is needed.
 type intelPackageSensor struct {
-	dev   *pawnIO
-	tjMax uint32
+	dev    *pawnIO
+	target uint32 // TjMax
 }
 
 // openIntelPackageSensor opens PawnIO, loads the Intel module and resolves
@@ -55,7 +55,18 @@ func openIntelPackageSensor() (*intelPackageSensor, error) {
 		dev.close()
 		return nil, errors.New("IA32_TEMPERATURE_TARGET reports no TjMax on this CPU")
 	}
-	return &intelPackageSensor{dev: dev, tjMax: tjMax}, nil
+	return &intelPackageSensor{dev: dev, target: tjMax}, nil
+}
+
+// openPackageSensor is the sampler's open hook: the Intel sensor as the
+// packageSensor interface, with a failed open returning a nil interface
+// rather than a typed nil.
+func openPackageSensor() (packageSensor, error) {
+	s, err := openIntelPackageSensor()
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // read returns the current package temperature in whole degrees.
@@ -68,12 +79,14 @@ func (s *intelPackageSensor) read() (uint32, error) {
 	if !valid {
 		return 0, errors.New("IA32_PACKAGE_THERM_STATUS: reading not valid")
 	}
-	c, ok := packageCelsius(s.tjMax, delta)
+	c, ok := packageCelsius(s.target, delta)
 	if !ok {
-		return 0, fmt.Errorf("IA32_PACKAGE_THERM_STATUS: readout %d exceeds TjMax %d", delta, s.tjMax)
+		return 0, fmt.Errorf("IA32_PACKAGE_THERM_STATUS: readout %d exceeds TjMax %d", delta, s.target)
 	}
 	return c, nil
 }
+
+func (s *intelPackageSensor) tjMax() uint32 { return s.target }
 
 func (s *intelPackageSensor) close() {
 	if s != nil {

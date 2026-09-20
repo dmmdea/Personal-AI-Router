@@ -137,6 +137,8 @@ func (p *pawnIO) call(name string, in []uint64, outLen int) ([]uint64, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The driver is always handed a real output cell: &out[0] needs a
+	// non-empty slice even for a function that writes nothing back.
 	if outLen < 1 {
 		outLen = 1
 	}

@@ -90,7 +90,7 @@ func main() {
 			fail("%v", err)
 		}
 		r := hostsensors.Report{HelperVersion: Version, CPU: &hostsensors.CPUReading{
-			PackageCelsius: c, TjMaxCelsius: s.tjMax, Source: sourceIntelMSR, SampledAt: time.Now().UTC(),
+			PackageCelsius: c, TjMaxCelsius: s.tjMax(), Source: sourceIntelMSR, SampledAt: time.Now().UTC(),
 		}}
 		if err := hostsensors.Encode(os.Stdout, r); err != nil {
 			fail("%v", err)
@@ -133,7 +133,7 @@ func main() {
 
 // runHelper samples until ctx ends and serves the latest report on the pipe.
 func runHelper(ctx context.Context, pipe string, interval time.Duration, log *slog.Logger) error {
-	s := startSampler(interval, log)
+	s := startSampler(interval, log, openPackageSensor)
 	defer s.Stop()
 	return servePipe(ctx, pipe, s.report, log)
 }
