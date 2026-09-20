@@ -232,6 +232,12 @@ type statsCollector struct {
 	// (cputemp_windows.go); each tick publishes its latest package reading.
 	cpuTemp *cpuTempPoller
 
+	// accels are the per-device inference-accelerator samplers
+	// (accel_windows.go), one goroutine each on their own slow cadence; the
+	// tick only folds their latest published sample into the snapshot. Nil on
+	// a host without HailoRT or without a Hailo module.
+	accels []*hailoSampler
+
 	stop chan struct{}
 	// wg covers both long-lived goroutines the collector owns: the 1 s stats
 	// tick and the GPU inventory re-detect loop.
@@ -280,6 +286,7 @@ func startStatsCollector() *statsCollector {
 
 	c.gpuTemps = startGPUTempPoller()
 	c.cpuTemp = startCPUTempPoller()
+	c.accels = startHailoSamplers()
 	c.wg.Add(1)
 	go c.run()
 	c.startGPUInventory()
@@ -486,12 +493,37 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	// own poller; zero (omitted) while the helper is absent or its reading
 	// is stale.
 	snap.CPUTempC = c.cpuTemp.current()
+	// Accelerator rows carry only a temperature, under their own statsKey.
+	c.mergeAccelStats(snap)
 
 	if used, ok := readMemoryUsed(); ok {
 		snap.MemUsedBytes = used
 	}
 
 	return snap
+}
+
+// mergeAccelStats adds each accelerator sampler's latest sample to the
+// snapshot's GPU map under its statsKey. It runs after applyGPUStats (and
+// after the GPU-temperature merge) so the stale-preserve path — which may
+// alias the previous, already-published map — never gets mutated: when there
+// is anything to add, the map is cloned first. Accelerator samples
+// deliberately leave GPUSampledAt untouched — they are not GPU telemetry and
+// must not mark it fresh.
+func (c *statsCollector) mergeAccelStats(snap *statsSnapshot) {
+	if len(c.accels) == 0 {
+		return
+	}
+	merged := make(map[string]gpuStat, len(snap.GPU)+len(c.accels))
+	for k, v := range snap.GPU {
+		merged[k] = v
+	}
+	for _, a := range c.accels {
+		if st, ok := a.Latest(); ok {
+			merged[a.key] = st
+		}
+	}
+	snap.GPU = merged
 }
 
 func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
@@ -697,6 +729,9 @@ func (c *statsCollector) Stop() {
 		c.wg.Wait()
 		c.gpuTemps.Stop()
 		c.cpuTemp.Stop()
+		for _, a := range c.accels {
+			a.Stop()
+		}
 		if c.query != 0 {
 			procPdhCloseQuery.Call(c.query)
 			c.query = 0

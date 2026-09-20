@@ -150,6 +150,41 @@ Capacity and usage always come from the same side of that rule, so `vram_used_by
 - Power (`power1_input`) and clocks are exposed by the same hwmon but are not part of this wire contract.
 - A host with no AMD card costs one `os.ReadDir` of `/sys/class/drm` per tick and logs nothing; a host without `/sys/class/drm` at all logs one `Debug` line for the process lifetime.
 
+- **Windows** (first-class): GPU inventory comes from DXGI (vendor-agnostic, includes VRAM). Dynamic CPU / VRAM-used / utilization / memory-used numbers come from a persistent PDH query plus `GlobalMemoryStatusEx`. GPU temperature comes from `nvidia-smi` on a 5 s poller, joined to each DXGI adapter through the display driver's PCI address (`D3DKMTQueryAdapterInfo` / `KMTQAITYPE_ADAPTERADDRESS`), so two identical cards never swap readings; a host without `nvidia-smi` reports none. The CPU package temperature is polled every 5 s from the `nvpair-sensors` service's named pipe (`nvpair-shared/hostsensors`): the sensor is a model-specific register that only the elevated helper can read through PawnIO. A report older than 30 s is dropped, an absent helper is retried every 30 s, and in both cases `cpu.temperature_celsius` is omitted. Hailo inference accelerators are listed with `kind:"npu"` and a temperature; see **Windows Hailo (HailoRT)** below.
+- **Linux** (first-class): NVIDIA GPU inventory, dedicated VRAM usage, utilization and temperature come from `nvidia-smi`; CPU and system-memory usage come from `/proc`, the CPU package temperature from hwmon (`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`, else the `x86_pkg_temp` thermal zone). Unified-memory GPUs use the `/proc/meminfo` system-memory snapshot even when dynamic `nvidia-smi` collection is unavailable. Non-NVIDIA adapters fall back to names from `ghw` without dynamic GPU stats. Inference accelerators behind the gasket/apex driver (Google Coral Edge TPU, `/sys/class/apex/*`) are listed with `kind:"npu"`; the driver keeps no busy counter, so `utilization_percent` is the fraction of 100 ms sub-intervals in the last second in which the device's `interrupt_counts` moved (the same "percent of time working" definition as `nvidia-smi`'s `utilization.gpu`, at coarser resolution), and `temperature_celsius` comes from its `temp` attribute.
+- **macOS**: CPU and system-memory usage come from Mach through gopsutil's purego bindings. GPU identity, mapped memory, and utilization come from the built-in, unprivileged `/usr/sbin/ioreg` command's `IOAccelerator` `PerformanceStatistics`; no sudo or private framework binding is required. Apple Silicon is supported directly. Intel/AMD fields are best-effort when their drivers expose the same dedicated-memory counters. The performance keys are undocumented and may change across macOS releases; a missing or changed key leaves only that metric out and does not stop CPU or memory collection.
+- **Other platforms**: GPU names come from `ghw`; VRAM and dynamic stats are not reported.
+
+### Windows Hailo (HailoRT)
+
+A Hailo M.2 module is not a display adapter, so DXGI never sees it. `nvpair-node-info` lists it in the same `GPUs` inventory with `kind:"npu"`, alongside the Edge TPU rows Linux produces, by calling HailoRT's C API (`libhailort.dll`) directly through `LazyDLL` — no cgo and no new dependency.
+
+**Where the library is looked for**, in order:
+
+1. `%HAILORT_DIR%\libhailort.dll` and `%HAILORT_DIR%\bin\libhailort.dll`
+2. `%HAILORT_ROOT%\libhailort.dll` and `%HAILORT_ROOT%\bin\libhailort.dll`
+3. `%ProgramFiles%\HailoRT\bin\libhailort.dll` (the installer's default)
+4. `libhailort.dll` through the loader's own search path
+
+**What is reported.** `hailo_scan_devices` yields one row per module, keyed by its PCIe BDF. The row's name comes from `hailo_identify`'s `device_architecture` (`HAILO8L` → "Hailo-8L AI Accelerator", and likewise for Hailo-8 / 15H / 15L / 15M / 10H); an architecture this build does not know is named "Hailo AI Accelerator" rather than dropped. A sampler goroutine per device then holds one open handle and reads `hailo_get_chip_temperature` every 5 s, publishing the hotter of the two on-die sensors (TS0/TS1) as `temperature_celsius`, rounded. A reading whose `sample_count` is 0 is discarded. Three consecutive failed reads drop the handle so the next tick reopens it — a handle does not survive a driver restart or a surprise removal, and every read on a dead one fails forever.
+
+**Ceilings on this platform. These are limits of HailoRT 4.24 on Windows, not gaps to work around:**
+
+- **No utilization.** HailoRT exposes no busy counter and its monitor mode is unsupported on Windows, so a Hailo row carries **no** `utilization_percent`. The field is omitted, never published as a literal `0`, which would read as "idle". (On Linux the gasket driver's `interrupt_counts` supports the figure for an Edge TPU; there is no equivalent here.)
+- **No power.** Power measurement is unsupported on the M.2 Hailo-8L module, so `hailo_power_measurement` is not called.
+- So the row is **presence + name + temperature**, and nothing else.
+
+**Without HailoRT installed**, a fitted module is still listed from the PnP enumerator (`HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1E60&DEV_*`), named from its PCI device id, with no temperature. That branch also retains an entry for a module that has since been removed, so the library scan — which talks to the hardware — is always preferred and the registry is read only when it is unavailable. A host with neither the library nor the device logs one Debug line and reports no accelerator, exactly as before.
+
+Like every accelerator row, a Hailo device never contributes to `telemetryValid` / `msSince` and is skipped by `noderec.MaxGPUUtilization`: it cannot run the engines PAIR schedules.
+
+A live check against real hardware ships with the tests and is skipped unless `NVPAIR_LIVE_HAILO=1` is set:
+
+```
+go test -c -o hailo_windows.test.exe
+NVPAIR_LIVE_HAILO=1 hailo_windows.test.exe -test.run TestLiveHailoAccelerator -test.v
+```
+
 ## Shutdown
 
 The service shuts down on:
