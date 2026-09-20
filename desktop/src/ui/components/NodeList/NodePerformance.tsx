@@ -253,29 +253,31 @@ export default function NodePerformance({
                                         </Flex>
                                     </Flex>
                                 )}
-                                {/* GPU temperature — a reading, not a chart series */}
-                                <Flex align="center" gap="2">
-                                    <div
-                                        className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                                        style={{
-                                            backgroundColor: `${gpu.color}BF`,
-                                            border: `2px solid ${gpu.color}`,
-                                            marginTop: '1px',
-                                            opacity: isGpuSelected ? 1 : 0.3
-                                        }}
-                                    />
-                                    <Flex
-                                        align="center"
-                                        gap="2"
-                                        className="transition-opacity"
-                                        style={{ opacity: isGpuSelected ? 1 : 0.5 }}
-                                    >
-                                        <Text kind="body/regular/sm">Temp</Text>
-                                        <Text kind="body/regular/sm">
-                                            {gpu.temperature > 0 ? `${gpu.temperature} °C` : '--'}
-                                        </Text>
+                                {/* GPU temperature — a reading, not a chart series. A
+                                    device without one (an integrated GPU, a host without
+                                    nvidia-smi) gets no row rather than a placeholder. */}
+                                {gpu.temperature > 0 && (
+                                    <Flex align="center" gap="2">
+                                        <div
+                                            className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                                            style={{
+                                                backgroundColor: `${gpu.color}BF`,
+                                                border: `2px solid ${gpu.color}`,
+                                                marginTop: '1px',
+                                                opacity: isGpuSelected ? 1 : 0.3
+                                            }}
+                                        />
+                                        <Flex
+                                            align="center"
+                                            gap="2"
+                                            className="transition-opacity"
+                                            style={{ opacity: isGpuSelected ? 1 : 0.5 }}
+                                        >
+                                            <Text kind="body/regular/sm">Temp</Text>
+                                            <Text kind="body/regular/sm">{gpu.temperature} °C</Text>
+                                        </Flex>
                                     </Flex>
-                                </Flex>
+                                )}
                             </Stack>
                         </Stack>
                     )
