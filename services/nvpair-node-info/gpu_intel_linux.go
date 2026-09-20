@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"nvpair-shared/noderec"
 )
 
 // Linux Intel GPU inventory, read from the i915 / xe drivers' sysfs nodes.
@@ -50,12 +52,20 @@ import (
 //
 // Memory. An integrated Intel GPU has no dedicated VRAM: it allocates out of
 // system DRAM, exactly like the Mali rows in gpu_rockchip_linux.go. Those rows
-// are therefore marked usesSystemMemoryUsage and carry the system-memory total
-// as VramBytes, so a consumer sees the real ceiling and the real usage instead
-// of a zero. A discrete card reports its own mem_info_vram_total when the
-// driver exposes one; i915 does not expose it for an iGPU (verified on the
-// measured host: the attribute is absent), and an unknown capacity stays 0,
-// which omitempty drops from the wire.
+// carry the system-memory total as VramBytes and are stamped
+// noderec.GPUMemoryPoolUnified, so a consumer can show the real ceiling and
+// still say whose memory it is. A discrete card reports its own
+// mem_info_vram_total when the driver exposes one; i915 does not expose it for
+// an iGPU (verified on the measured host: the attribute is absent), and an
+// unknown capacity stays 0, which omitempty drops from the wire.
+//
+// What an Intel row does NOT carry is a used figure. i915 and xe publish no
+// unprivileged per-device allocation counter, and the host's own RAM usage is
+// not a stand-in for one: the iGPU holds a framebuffer and whatever a compute
+// context mapped, while /proc/meminfo counts every process on the box.
+// Publishing the second as the first had a UHD Graphics 630 reading
+// "VRAM 25.5 GB / 66 GB" on a host whose GPU was doing nothing. An omitted
+// number renders as a shared-pool ceiling instead, which is what is known.
 
 const (
 	// intelPCIVendor is Intel's PCI vendor id as the sysfs attribute spells it.
@@ -151,7 +161,7 @@ type intelCard struct {
 	driver    string // bound kernel driver, "i915" or "xe"
 
 	// discrete marks a card with its own VRAM. An integrated GPU allocates out
-	// of system DRAM and its row is published as unified memory instead.
+	// of system DRAM and its row is published as a unified pool instead.
 	discrete bool
 
 	// statsKey is "intel:<pci address>", the join key between the static row
@@ -182,12 +192,15 @@ func detectIntelGPUs(drmRoot string) []GPUInfo {
 			// invented capacity is worse than an omitted one.
 			row.VramBytes, _ = drmSysfsUint(c.deviceDir, "mem_info_vram_total")
 		} else {
+			// The pool is the host's and nothing here measures the GPU's share
+			// of it, so the row publishes the ceiling and no usage at all.
 			row.VramBytes = systemMemTotal()
-			row.usesSystemMemoryUsage = true
+			row.MemoryPool = noderec.GPUMemoryPoolUnified
 		}
 		slog.Debug("Intel GPU detected",
 			"name", row.Name, "stats_key", row.statsKey, "driver", c.driver,
-			"discrete", c.discrete, "vram_bytes", row.VramBytes)
+			"discrete", c.discrete, "vram_bytes", row.VramBytes,
+			"memory_pool", row.MemoryPool)
 		out = append(out, row)
 	}
 	return out

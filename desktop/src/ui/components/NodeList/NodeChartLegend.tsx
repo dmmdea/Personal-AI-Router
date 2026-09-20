@@ -4,7 +4,7 @@
 import { memo } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { CpuFallbackInfo, GpuInfo } from '@/ui/types/node-hardware'
-import { showsUsage, showsVram } from '@/ui/utils/hardware-rows'
+import { memoryLabel, memoryLineValue, showsUsage, showsVram } from '@/ui/utils/hardware-rows'
 
 const dotSize = '10px'
 
@@ -82,15 +82,17 @@ function NodeChartLegend({
                     )}
                     {/* An accelerator (Edge TPU / NPU) and the motherboard
                         controller have no VRAM figure; the row would only ever
-                        read "0 B / 0 B". */}
+                        read "0 B / 0 B". A device sharing the host's memory
+                        reads "Shared", with a used figure only if it measured
+                        one — see ui/utils/hardware-rows.ts. */}
                     {showsVram(gpu) && (
                         <Flex align="center" gap="2">
                             <ColorDot color={gpu.vramColor} />
                             <Text kind="body/regular/sm" className="text-subtle-color">
-                                VRAM
+                                {memoryLabel(gpu)}
                             </Text>
                             <Text kind="body/semibold/sm">
-                                {gpu.vramUsageFormatted} / {gpu.vramTotalFormatted}
+                                {memoryLineValue(gpu, gpu.vramUsedBytes)}
                             </Text>
                         </Flex>
                     )}

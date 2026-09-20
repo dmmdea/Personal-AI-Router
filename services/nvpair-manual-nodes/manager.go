@@ -48,6 +48,13 @@ type GPUInfo struct {
 	VramBytes          uint64 `json:"vram_bytes,omitempty"`
 	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	// MemoryPool is carried through verbatim (noderec.GPUMemoryPoolUnified on
+	// a device whose capacity is a pool it shares with the host). This struct
+	// re-marshals what node-info sent, so a field dropped here is a field the
+	// broker and the UI never see: without it an integrated GPU's row arrives
+	// as a bare capacity with no usage and gets rendered "0 B / 66 GB", which
+	// reads as an idle 66 GB of VRAM that does not exist.
+	MemoryPool string `json:"memory_pool,omitempty"`
 }
 
 // CPUInfo and MemoryInfo mirror the top-level objects nvpair-node-info
@@ -721,7 +728,8 @@ func gpusEqual(a, b []GPUInfo) bool {
 		if a[i].Name != b[i].Name ||
 			a[i].VramBytes != b[i].VramBytes ||
 			a[i].VramUsedBytes != b[i].VramUsedBytes ||
-			a[i].UtilizationPercent != b[i].UtilizationPercent {
+			a[i].UtilizationPercent != b[i].UtilizationPercent ||
+			a[i].MemoryPool != b[i].MemoryPool {
 			return false
 		}
 	}

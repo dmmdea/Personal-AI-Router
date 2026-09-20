@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jaypipes/ghw"
+
+	"nvpair-shared/noderec"
 )
 
 // nvidiaSmiTimeout caps how long we wait for a single nvidia-smi invocation.
@@ -155,6 +157,14 @@ func isNvidiaSmiNA(s string) bool {
 // from system memory without depending on dynamic nvidia-smi collection. The
 // second return value reports whether any row was unified, allowing the caller
 // to fetch the shared system-memory total only when needed.
+//
+// These rows are the one place usesSystemMemoryUsage still belongs. On a
+// Grace-Blackwell part the CPU and the GPU allocate from one physical pool
+// through one allocator, which is exactly why memory.total answers [N/A]:
+// there is no separate GPU figure, and the host's IS the accelerator's. Every
+// other unified row in this service (Intel iGPU, Mali, RKNPU) sets MemoryPool
+// alone and reports no usage, because on those parts the two numbers are not
+// the same thing. MemoryPool goes on all of them, this flag on none but these.
 func parseNvidiaStatic(out string) ([]GPUInfo, bool) {
 	var gpus []GPUInfo
 	var unifiedMemory bool
@@ -174,12 +184,16 @@ func parseNvidiaStatic(out string) ([]GPUInfo, bool) {
 		} else if mib, err := strconv.ParseUint(fields[2], 10, 64); err == nil {
 			vramBytes = mib * 1024 * 1024
 		}
-		gpus = append(gpus, GPUInfo{
+		row := GPUInfo{
 			Name:                  name,
 			VramBytes:             vramBytes,
 			statsKey:              uuid,
 			usesSystemMemoryUsage: usesUnifiedMemory,
-		})
+		}
+		if usesUnifiedMemory {
+			row.MemoryPool = noderec.GPUMemoryPoolUnified
+		}
+		gpus = append(gpus, row)
 	}
 	return gpus, unifiedMemory
 }

@@ -8,6 +8,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"nvpair-shared/noderec"
 )
 
 // TestParseProcStat pins the /proc/stat aggregate-line parse. The collector
@@ -237,7 +239,14 @@ func TestParseNvidiaStatic(t *testing.T) {
 			name: "unified memory [N/A]",
 			in:   "GPU-spark, NVIDIA GB10, [N/A]\n",
 			want: []GPUInfo{
-				{Name: "NVIDIA GB10", VramBytes: 0, statsKey: "GPU-spark", usesSystemMemoryUsage: true},
+				{
+					Name: "NVIDIA GB10", VramBytes: 0, statsKey: "GPU-spark",
+					// A UMA part is the one row that is BOTH: its capacity is
+					// a pool shared with the CPU (MemoryPool) and the host's
+					// usage figure genuinely is its own (usesSystemMemoryUsage).
+					// Every other unified row sets only the first.
+					MemoryPool: noderec.GPUMemoryPoolUnified, usesSystemMemoryUsage: true,
+				},
 			},
 			wantUMA: true,
 		},
@@ -245,7 +254,14 @@ func TestParseNvidiaStatic(t *testing.T) {
 			name: "unified memory Not Supported",
 			in:   "GPU-spark, NVIDIA GB10, [Not Supported]\n",
 			want: []GPUInfo{
-				{Name: "NVIDIA GB10", VramBytes: 0, statsKey: "GPU-spark", usesSystemMemoryUsage: true},
+				{
+					Name: "NVIDIA GB10", VramBytes: 0, statsKey: "GPU-spark",
+					// A UMA part is the one row that is BOTH: its capacity is
+					// a pool shared with the CPU (MemoryPool) and the host's
+					// usage figure genuinely is its own (usesSystemMemoryUsage).
+					// Every other unified row sets only the first.
+					MemoryPool: noderec.GPUMemoryPoolUnified, usesSystemMemoryUsage: true,
+				},
 			},
 			wantUMA: true,
 		},
@@ -255,7 +271,14 @@ func TestParseNvidiaStatic(t *testing.T) {
 				"GPU-spark, NVIDIA GB10, [N/A]\n",
 			want: []GPUInfo{
 				{Name: "NVIDIA GeForce RTX 4090", VramBytes: 24564 * 1024 * 1024, statsKey: "GPU-aaa"},
-				{Name: "NVIDIA GB10", VramBytes: 0, statsKey: "GPU-spark", usesSystemMemoryUsage: true},
+				{
+					Name: "NVIDIA GB10", VramBytes: 0, statsKey: "GPU-spark",
+					// A UMA part is the one row that is BOTH: its capacity is
+					// a pool shared with the CPU (MemoryPool) and the host's
+					// usage figure genuinely is its own (usesSystemMemoryUsage).
+					// Every other unified row sets only the first.
+					MemoryPool: noderec.GPUMemoryPoolUnified, usesSystemMemoryUsage: true,
+				},
 			},
 			wantUMA: true,
 		},

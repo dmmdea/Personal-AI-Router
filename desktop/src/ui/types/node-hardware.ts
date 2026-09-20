@@ -6,9 +6,10 @@ export type GpuInfo = {
     name: string
     // hliId: string;
     vramTotal: number
-    vramTotalFormatted: string
-    vramUsageFormatted: string
-    vramUsage: number // percentage
+    // Bytes this device is holding, or null when the node reports no figure
+    // for it — a shared-pool device whose driver counts nothing. The memory
+    // line then shows the ceiling alone; see ui/utils/hardware-rows.ts.
+    vramUsedBytes: number | null
     usage: number // percentage
     usageColor: string
     vramColor: string
@@ -16,6 +17,9 @@ export type GpuInfo = {
     // "npu" for an accelerator row (no VRAM) or "board" for the motherboard
     // controller (no VRAM and no usage); absent for a GPU.
     kind?: string
+    // "unified" when vramTotal is a pool shared with the host; absent for a
+    // discrete card. Drives the "Shared" vs "VRAM" label.
+    memoryPool?: string
 }
 
 export type CpuFallbackInfo = {

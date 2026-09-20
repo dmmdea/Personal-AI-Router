@@ -9,7 +9,13 @@ import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
-import { showsUsage, showsVram } from '@/ui/utils/hardware-rows'
+import {
+    memoryLabel,
+    memoryLineValue,
+    memoryUsedBytes,
+    showsUsage,
+    showsVram
+} from '@/ui/utils/hardware-rows'
 
 export default function NodePerformance({
     node,
@@ -20,6 +26,7 @@ export default function NodePerformance({
 }) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
     const [selectedMetric, setSelectedMetric] = useState<string | undefined>(undefined)
+    const gpuRows = node.topology.gpus
 
     const handleLegendClick = useCallback((metricKey: string) => {
         // If clicking the same metric that's already selected, show all
@@ -37,6 +44,10 @@ export default function NodePerformance({
 
         const gpuCount = nodeMetrics.gpuUtilization.length
         const result: MetricDataset[] = []
+        // The node's GPU rows by id. The utilization series still follows this
+        // order positionally; the VRAM series no longer can, and it also needs
+        // the row itself to know what to call the line.
+        const gpuRowById = new Map(gpuRows.map((gpu, index) => [gpu.id, { gpu, index }]))
 
         // Add GPU utilization datasets (cycling through color palette)
         nodeMetrics.gpuUtilization.forEach((gpu, index) => {
@@ -65,19 +76,31 @@ export default function NodePerformance({
             key: 'memory'
         })
 
-        // Add VRAM datasets (cycling through color palette)
-        nodeMetrics.gpuVramUsage.forEach((gpu, index) => {
-            const color = getVramColor(index)
+        // Add VRAM datasets (cycling through color palette).
+        //
+        // The series present here are exactly the rows the node reported a
+        // used figure for: the bridge emits none for a shared-pool device
+        // nothing measures, so no flat 0 line is drawn claiming an idle GPU.
+        // Colors and labels stay keyed to the row's position in the node's GPU
+        // list rather than to this array's index, so a skipped row does not
+        // shift the remaining series onto another GPU's color.
+        nodeMetrics.gpuVramUsage.forEach(series => {
+            const row = gpuRowById.get(series.id)
+            const gpuIndex = row?.index ?? 0
+            // "Shared" for a pool the device splits with the host, so the
+            // plotted line and the hardware line beside it agree on what the
+            // device actually owns.
+            const label = row ? memoryLabel(row.gpu) : 'VRAM'
             result.push({
-                data: gpu.data,
-                label: gpuCount > 1 ? `VRAM ${index}` : 'VRAM',
-                color,
-                key: `vram-${gpu.id}`
+                data: series.data,
+                label: gpuCount > 1 ? `${label} ${gpuIndex}` : label,
+                color: getVramColor(gpuIndex),
+                key: `vram-${series.id}`
             })
         })
 
         return result
-    }, [nodeMetrics])
+    }, [gpuRows, nodeMetrics])
 
     const hardwareInfo = useMemo(() => {
         const totalStorage = node.topology.storage.reduce(
@@ -97,19 +120,26 @@ export default function NodePerformance({
             // radial filters to inference-ready GPUs (via inferenceHardwareIds).
             gpus: node.topology.gpus.map((gpu, index) => {
                 const gpuUtilData = nodeMetrics?.gpuUtilization[index]
-                const gpuVramData = nodeMetrics?.gpuVramUsage[index]
+                // By id, not by index: the bridge emits no VRAM series for a
+                // shared-pool row the node could not measure, so this array no
+                // longer lines up with topology.gpus and positional lookup
+                // would hand one GPU's memory usage to the next one along.
+                const gpuVramData = nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)
 
                 return {
                     id: gpu.id,
                     name: gpu.name,
                     vramTotal: gpu.vramTotal,
-                    vramFormatted: formatBytes(gpu.vramTotal, 1),
                     utilization: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
-                    vramUsage: gpuVramData ? getLatestValue(gpuVramData.data) : 0,
+                    vramUsedBytes: memoryUsedBytes(
+                        gpu,
+                        gpuVramData ? getLatestValue(gpuVramData.data) : null
+                    ),
                     color: getGpuColor(index),
                     vramColor: getVramColor(index),
                     temperature: nodeMetrics?.gpuTemperature.find(t => t.id === gpu.id)?.value ?? 0,
-                    kind: gpu.kind
+                    kind: gpu.kind,
+                    memoryPool: gpu.memoryPool
                 }
             }),
             cpuCores: node.topology.cpu.cores,
@@ -233,7 +263,9 @@ export default function NodePerformance({
                                     )}
 
                                     {/* GPU VRAM — skipped for an accelerator row and for the
-                                        motherboard controller (no VRAM figure) */}
+                                        motherboard controller (no VRAM figure). A device
+                                        sharing the host's memory reads "Shared", with a used
+                                        figure only if it measured one. */}
                                     {showsVram(gpu) && (
                                         <Flex
                                             align="center"
@@ -266,15 +298,11 @@ export default function NodePerformance({
                                                             : 0.5
                                                 }}
                                             >
-                                                <Text kind="body/regular/sm">VRAM</Text>
                                                 <Text kind="body/regular/sm">
-                                                    {formatBytes(
-                                                        Math.floor(
-                                                            (gpu.vramTotal * gpu.vramUsage) / 100
-                                                        ),
-                                                        1
-                                                    )}{' '}
-                                                    / {gpu.vramFormatted}
+                                                    {memoryLabel(gpu)}
+                                                </Text>
+                                                <Text kind="body/regular/sm">
+                                                    {memoryLineValue(gpu, gpu.vramUsedBytes)}
                                                 </Text>
                                             </Flex>
                                         </Flex>
