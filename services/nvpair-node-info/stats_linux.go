@@ -28,7 +28,8 @@ import (
 //     two ticks (it reports cumulative jiffies, so a single read is
 //     meaningless — we need a delta).
 //   - memory-used  : /proc/meminfo, MemTotal - MemAvailable.
-//   - GPU          : `nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used`,
+//   - GPU          : `nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,
+//     temperature.gpu,power.draw`,
 //     joined back to the static GPUInfo records by UUID (the statsKey that
 //     gpu_linux.go stamps on each adapter). On unified-memory architectures
 //     (UMA, e.g. Grace-Blackwell / DGX Spark) nvidia-smi returns [N/A] for
@@ -85,6 +86,13 @@ type statsCollector struct {
 	// once at start (cputemp_linux.go); empty when the host exposes none.
 	cpuTemp cpuTempSource
 
+	// cpuPower is the powercap RAPL package energy counter, resolved once at
+	// start (cpupower_linux.go). It holds the previous sample because watts
+	// are a derivative, so only this goroutine may call read — the same
+	// single-writer rule prevCPU relies on. Empty path on the ordinary host
+	// where the counter is root-only.
+	cpuPower cpuPowerSource
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -110,6 +118,17 @@ func startStatsCollector() *statsCollector {
 		slog.Info("CPU temperature source", "path", c.cpuTemp.path)
 	} else {
 		slog.Info("no CPU temperature source on this host; cpu.temperature_celsius will be omitted")
+	}
+	c.cpuPower = findCPUPowerSource()
+	if c.cpuPower.path != "" {
+		slog.Info("CPU power source", "path", c.cpuPower.path)
+	} else {
+		// One line, at Info: on a modern kernel the RAPL counter is root-only
+		// and this service runs unprivileged, so this is the expected state on
+		// most hosts rather than a fault. The reason travels with it so a
+		// field report says "permission denied" instead of "not supported".
+		slog.Info("no readable CPU power source on this host; cpu.power_watts will be omitted",
+			"reason", c.cpuPower.note)
 	}
 	go c.run()
 	return c
@@ -160,6 +179,9 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if t, ok := c.cpuTemp.read(); ok {
 		snap.CPUTempC = t
 	}
+	if w, ok := c.cpuPower.read(time.Now()); ok {
+		snap.CPUPowerWatts = w
+	}
 
 	gpu := make(map[string]gpuStat)
 	sampledAt := time.Time{}
@@ -204,7 +226,7 @@ func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	if c.nvidiaUnavailable.Load() {
 		return false
 	}
-	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used,temperature.gpu")
+	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used,temperature.gpu,power.draw")
 	if err != nil {
 		if c.nvidiaUnavailable.CompareAndSwap(false, true) {
 			slog.Warn("nvidia-smi unavailable; GPU utilization / dedicated VRAM-used will not be reported",
@@ -352,11 +374,13 @@ func parseMeminfoUsed(s string) (uint64, bool) {
 	}
 }
 
-// parseNvidiaDynamic decodes the dynamic query (uuid,utilization.gpu,
-// memory.used) into the per-GPU snapshot map keyed by UUID — the same statsKey
-// gpu_linux.go stamped on each static GPUInfo. memory.used is in MiB
-// (-nounits) and converted to bytes; utilization.gpu is an integer percent,
-// clamped to 100. The returned sample count includes a parsed 0 % reading but
+// parseNvidiaDynamic decodes the dynamic query (uuid, utilization.gpu,
+// memory.used, temperature.gpu, power.draw) into the per-GPU snapshot map
+// keyed by UUID — the same statsKey gpu_linux.go stamped on each static
+// GPUInfo. memory.used is in MiB (-nounits) and converted to bytes;
+// utilization.gpu is an integer percent, clamped to 100; power.draw is watts
+// rounded to a whole number by parseWatts, and an [N/A] meter stays absent.
+// The returned sample count includes a parsed 0 % reading but
 // excludes [N/A] and malformed utilization, so callers do not mistake
 // memory-only rows for fresh utilization. Rows with a missing uuid are skipped.
 // A memory.used value of [N/A] remains zero here; buildResponse supplies
@@ -390,6 +414,14 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		if len(fields) >= 4 {
 			if c, err := strconv.ParseUint(fields[3], 10, 32); err == nil {
 				stat.TemperatureC = uint32(c)
+			}
+		}
+		// power.draw is watts with two decimals under -nounits, rounded to
+		// whole watts here. [N/A] on a card with no meter leaves it zero,
+		// which drops the field rather than claiming the card draws nothing.
+		if len(fields) >= 5 {
+			if w, ok := parseWatts(fields[4]); ok {
+				stat.PowerWatts = w
 			}
 		}
 		res[uuid] = stat

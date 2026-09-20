@@ -349,6 +349,22 @@ func TestParseNvidiaDynamic(t *testing.T) {
 			},
 			wantSamples: 1,
 		},
+		{
+			// Temperature and power ride the same query as everything else.
+			// The second row is the one that matters: a card metering itself
+			// while reporting no temperature keeps its wattage, and a card
+			// that meters nothing leaves the field absent rather than 0.
+			name: "temperature and power draw ride the same rows",
+			in: "GPU-aaa, 37, 8192, 64, 210.55\n" +
+				"GPU-bbb, 10, 1024, [N/A], 71.20\n" +
+				"GPU-ccc, 5, 512, 44, [N/A]\n",
+			want: map[string]gpuStat{
+				"GPU-aaa": {UtilizationPct: 37, VRAMUsed: 8192 * 1024 * 1024, TemperatureC: 64, PowerWatts: 211},
+				"GPU-bbb": {UtilizationPct: 10, VRAMUsed: 1024 * 1024 * 1024, PowerWatts: 71},
+				"GPU-ccc": {UtilizationPct: 5, VRAMUsed: 512 * 1024 * 1024, TemperatureC: 44},
+			},
+			wantSamples: 3,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

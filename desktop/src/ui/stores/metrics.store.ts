@@ -21,6 +21,12 @@ export interface NodeMetricsHistory {
     // numbers next to the legend, not charted.
     gpuTemperature: GpuMetricValue[]
     cpuTemperature: number
+    // Same shape for power draw (whole watts; 0 = nothing meters that
+    // device). Replaced wholesale from each snapshot rather than appended,
+    // which is also why neither of these can go stale the way the charted
+    // series could — see pruneSeries.
+    gpuPower: GpuMetricValue[]
+    cpuPower: number
 }
 
 interface MetricsStore {
@@ -45,6 +51,26 @@ function createPrefill(baseTs: number): PerformanceMetric[] {
         timestamp: baseTs - (MAX_DATA_POINTS - i) * 1000,
         value: 0
     }))
+}
+
+/**
+ * Drops history for series the node is no longer reporting.
+ *
+ * Entries were only ever added here, never removed, so a row that stopped
+ * reporting kept its last value on screen until the app restarted. That is
+ * exactly what happened when node-info stopped sending a used figure for a
+ * shared-pool GPU: the card went on reading "Shared 25.1 GB / 66 GB" —
+ * a measurement nobody was taking any more — because the entry with that id
+ * was still in this array.
+ *
+ * The rule is presence in the current snapshot, not the value in it. A
+ * dedicated GPU that misses one sample still appears in `present` (the
+ * bridge emits an entry for every row it knows), so its line does not blink
+ * out and back; only a series whose id is genuinely gone is dropped.
+ */
+function pruneSeries(series: GpuMetricsHistory[], present: GpuMetricValue[]): GpuMetricsHistory[] {
+    const ids = new Set(present.map(entry => entry.id))
+    return series.filter(entry => ids.has(entry.id))
 }
 
 export const useMetricsStore = create<MetricsStore>((set, get) => ({
@@ -84,7 +110,9 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
                         cpuUtilization: createPrefill(ts),
                         memoryUsage: createPrefill(ts),
                         gpuTemperature: [],
-                        cpuTemperature: 0
+                        cpuTemperature: 0,
+                        gpuPower: [],
+                        cpuPower: 0
                     }
                     map.set(metrics.id, history)
                 }
@@ -114,8 +142,25 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
 
                 pushMetric(history.cpuUtilization, metrics.current.cpuUtilization, ts)
                 pushMetric(history.memoryUsage, metrics.current.memoryUsage, ts)
+
+                // Drop series the node has stopped reporting. Without this a
+                // row that goes quiet keeps its last value on the card for
+                // the life of the process.
+                history.gpuUtilization = pruneSeries(
+                    history.gpuUtilization,
+                    metrics.current.gpuUtilization
+                )
+                history.gpuVramUsage = pruneSeries(
+                    history.gpuVramUsage,
+                    metrics.current.gpuVramUsage
+                )
+
+                // Temperature and power are the whole snapshot each time, so
+                // an id that disappears is already gone from them.
                 history.gpuTemperature = metrics.current.gpuTemperature ?? []
                 history.cpuTemperature = metrics.current.cpuTemperature ?? 0
+                history.gpuPower = metrics.current.gpuPower ?? []
+                history.cpuPower = metrics.current.cpuPower ?? 0
 
                 map.set(metrics.id, { ...history })
                 set({ generation: get().generation + 1 })

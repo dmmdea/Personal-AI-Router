@@ -10,11 +10,13 @@ import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
 import {
+    cpuThermalSuffix,
     memoryLabel,
     memoryLineValue,
     memoryUsedBytes,
+    showsMemoryLine,
     showsUsage,
-    showsVram
+    thermalLine
 } from '@/ui/utils/hardware-rows'
 
 export default function NodePerformance({
@@ -138,6 +140,7 @@ export default function NodePerformance({
                     color: getGpuColor(index),
                     vramColor: getVramColor(index),
                     temperature: nodeMetrics?.gpuTemperature.find(t => t.id === gpu.id)?.value ?? 0,
+                    power: nodeMetrics?.gpuPower.find(p => p.id === gpu.id)?.value ?? 0,
                     kind: gpu.kind,
                     memoryPool: gpu.memoryPool
                 }
@@ -146,6 +149,7 @@ export default function NodePerformance({
             cpuModel: node.topology.cpu.model,
             cpuUtilization: nodeMetrics ? getLatestValue(nodeMetrics.cpuUtilization) : 0,
             cpuTemperature: nodeMetrics?.cpuTemperature ?? 0,
+            cpuPower: nodeMetrics?.cpuPower ?? 0,
             memory: formatBytes(node.topology.ram, 1),
             memoryTotal: node.topology.ram,
             memoryUsage: nodeMetrics ? getLatestValue(nodeMetrics.memoryUsage) : 0,
@@ -202,6 +206,9 @@ export default function NodePerformance({
                             selectedMetric === undefined ||
                             selectedMetric === `gpu-${gpu.id}` ||
                             selectedMetric === `vram-${gpu.id}`
+                        // "Temp 50 °C (200 W)", or "Power 200 W" on a metered
+                        // device with no thermal readout, or nothing at all.
+                        const thermal = thermalLine(gpu.temperature, gpu.power)
 
                         return (
                             <Stack gap="0" key={gpu.id}>
@@ -263,10 +270,10 @@ export default function NodePerformance({
                                     )}
 
                                     {/* GPU VRAM — skipped for an accelerator row and for the
-                                        motherboard controller (no VRAM figure). A device
-                                        sharing the host's memory reads "Shared", with a used
-                                        figure only if it measured one. */}
-                                    {showsVram(gpu) && (
+                                        motherboard controller (no VRAM figure), and for a
+                                        shared pool nothing measured: a bare ceiling is a
+                                        static number sitting among live readings. */}
+                                    {showsMemoryLine(gpu, gpu.vramUsedBytes) && (
                                         <Flex
                                             align="center"
                                             gap="2"
@@ -307,10 +314,12 @@ export default function NodePerformance({
                                             </Flex>
                                         </Flex>
                                     )}
-                                    {/* GPU temperature — a reading, not a chart series. A
-                                    device without one (an integrated GPU, a host without
-                                    nvidia-smi) gets no row rather than a placeholder. */}
-                                    {gpu.temperature > 0 && (
+                                    {/* GPU temperature and power — readings, not chart
+                                    series, on one row because they describe one device
+                                    state. A device with neither (an integrated GPU, a host
+                                    without nvidia-smi) gets no row rather than a
+                                    placeholder. */}
+                                    {thermal && (
                                         <Flex align="center" gap="2">
                                             <div
                                                 className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
@@ -327,10 +336,8 @@ export default function NodePerformance({
                                                 className="transition-opacity"
                                                 style={{ opacity: isGpuSelected ? 1 : 0.5 }}
                                             >
-                                                <Text kind="body/regular/sm">Temp</Text>
-                                                <Text kind="body/regular/sm">
-                                                    {gpu.temperature} °C
-                                                </Text>
+                                                <Text kind="body/regular/sm">{thermal.label}</Text>
+                                                <Text kind="body/regular/sm">{thermal.value}</Text>
                                             </Flex>
                                         </Flex>
                                     )}
@@ -377,9 +384,10 @@ export default function NodePerformance({
                             <Text kind="body/regular/sm">
                                 {Math.floor(hardwareInfo.cpuUtilization)}%{' '}
                                 {hardwareInfo.cpuCores ? `(${hardwareInfo.cpuCores} cores)` : ''}
-                                {hardwareInfo.cpuTemperature > 0
-                                    ? ` · ${hardwareInfo.cpuTemperature} °C`
-                                    : ''}
+                                {cpuThermalSuffix(
+                                    hardwareInfo.cpuTemperature,
+                                    hardwareInfo.cpuPower
+                                )}
                             </Text>
                         </Stack>
                     </Flex>

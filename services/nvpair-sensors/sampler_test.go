@@ -19,6 +19,14 @@ type fakeSensor struct {
 	script []readResult
 	reads  int
 	closed bool
+	// watts is what power() reports, and powerOK whether it reports
+	// anything at all. The default zero value is a part with no energy
+	// counter, which is what most of these cases are about.
+	watts   float64
+	powerOK bool
+	// powerCalls counts power() so a test can assert it was sampled on the
+	// same tick as the temperature rather than on a timer of its own.
+	powerCalls int
 }
 
 type readResult struct {
@@ -33,6 +41,11 @@ func (f *fakeSensor) read() (uint32, error) {
 	}
 	f.reads++
 	return f.script[i].c, f.script[i].err
+}
+
+func (f *fakeSensor) power(time.Time) (float64, bool) {
+	f.powerCalls++
+	return f.watts, f.powerOK
 }
 
 func (f *fakeSensor) tjMax() uint32 { return 100 }
@@ -395,5 +408,60 @@ func TestSamplerStopClosesBoardSensor(t *testing.T) {
 	s.Stop()
 	if !b.closed {
 		t.Fatal("Stop did not close the board sensor")
+	}
+}
+
+// TestSamplerPublishesPackageWatts: power rides the same tick and the same
+// SampledAt as the temperature, so a reader applying one freshness window
+// gets a consistent pair.
+func TestSamplerPublishesPackageWatts(t *testing.T) {
+	fs := &fakeSensor{script: []readResult{{c: 58}}, watts: 140, powerOK: true}
+	o := &opener{queue: []*fakeSensor{fs}}
+	now := time.Date(2026, 9, 20, 16, 0, 0, 0, time.UTC)
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return now })
+
+	s.tick(&samplerState{})
+	r := s.report()
+	if r.CPU == nil {
+		t.Fatalf("no CPU reading: %+v", r)
+	}
+	if r.CPU.PackageWatts != 140 {
+		t.Fatalf("package_watts = %v, want 140", r.CPU.PackageWatts)
+	}
+	if !r.CPU.SampledAt.Equal(now.UTC()) {
+		t.Fatalf("SampledAt = %v, want the tick's own time", r.CPU.SampledAt)
+	}
+	if fs.powerCalls != 1 {
+		t.Fatalf("power sampled %d times for one tick", fs.powerCalls)
+	}
+
+	watts, ok := r.CPUPackageWatts(now, time.Minute)
+	if !ok || watts != 140 {
+		t.Fatalf("CPUPackageWatts = %v, %v; want 140, true", watts, ok)
+	}
+}
+
+// TestSamplerKeepsTheTemperatureWithoutPower is the failure mode worth
+// guarding: this helper exists for the temperature, and a part whose energy
+// counter it cannot read must not lose the reading every consumer depends on.
+func TestSamplerKeepsTheTemperatureWithoutPower(t *testing.T) {
+	fs := &fakeSensor{script: []readResult{{c: 58}}} // powerOK false: no counter
+	o := &opener{queue: []*fakeSensor{fs}}
+	now := time.Date(2026, 9, 20, 16, 0, 0, 0, time.UTC)
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return now })
+
+	s.tick(&samplerState{})
+	r := s.report()
+	if r.CPU == nil || r.CPU.PackageCelsius != 58 {
+		t.Fatalf("temperature lost with the power: %+v", r.CPU)
+	}
+	if r.CPU.PackageWatts != 0 {
+		t.Fatalf("package_watts = %v, want zero (omitted)", r.CPU.PackageWatts)
+	}
+	if r.Error != "" {
+		t.Fatalf("a missing wattage was reported as an error: %q", r.Error)
+	}
+	if _, ok := r.CPUPackageWatts(now, time.Minute); ok {
+		t.Fatal("CPUPackageWatts reported a figure for a report that carries none")
 	}
 }

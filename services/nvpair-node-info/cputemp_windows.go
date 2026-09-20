@@ -36,7 +36,17 @@ const (
 	cpuTempMaxAge        = 30 * time.Second
 )
 
-// cpuTempPoller owns the pipe reads and publishes degrees atomically.
+// cpuSample is the pair of CPU readings one helper report carries. They are
+// published behind a single atomic pointer so a reader can never combine a
+// temperature from one poll with a wattage from another — the helper samples
+// both off the same open sensor on the same tick, and the collector should
+// not undo that.
+type cpuSample struct {
+	celsius uint32
+	watts   float64
+}
+
+// cpuTempPoller owns the pipe reads and publishes those readings atomically.
 type cpuTempPoller struct {
 	read func() (hostsensors.Report, error)
 	// observe, when set, is handed every report this poller fetches,
@@ -46,7 +56,7 @@ type cpuTempPoller struct {
 	// Called from the poll goroutine, which is its only caller.
 	observe func(hostsensors.Report, error)
 	now     func() time.Time
-	latest  atomic.Uint32
+	latest  atomic.Pointer[cpuSample]
 
 	// announced / lastNote belong to the poll goroutine: they keep the log
 	// to one line per state change instead of one per tick.
@@ -93,31 +103,39 @@ func (p *cpuTempPoller) run() {
 	}
 }
 
-// poll reads one report and publishes the temperature it carries, or zero.
+// poll reads one report and publishes the readings it carries, or zeroes.
 // It returns whether the helper answered at all, which picks the next delay.
+//
+// Temperature and power are asked for separately against the same freshness
+// window: a helper on a part whose energy counter it could not resolve sends
+// a temperature and no wattage, and a reading is not worth dropping because
+// its companion is absent.
 func (p *cpuTempPoller) poll() bool {
 	r, err := p.read()
 	if p.observe != nil {
 		p.observe(r, err)
 	}
 	if err != nil {
-		p.latest.Store(0)
+		p.latest.Store(&cpuSample{})
 		p.announced = false
 		p.note(slog.LevelInfo, "unreachable: "+err.Error(),
 			"host sensor helper not reachable; cpu.temperature_celsius will be omitted",
 			"pipe", hostsensors.PipeName, "err", err)
 		return false
 	}
-	if c, ok := r.CPUPackage(p.now(), cpuTempMaxAge); ok {
-		p.latest.Store(c)
+	now := p.now()
+	celsius, haveTemp := r.CPUPackage(now, cpuTempMaxAge)
+	watts, _ := r.CPUPackageWatts(now, cpuTempMaxAge)
+	p.latest.Store(&cpuSample{celsius: celsius, watts: watts})
+	if haveTemp {
 		if !p.announced {
-			slog.Info("CPU temperature source", "helper", "nvpair-sensors", "helper_version", r.HelperVersion, "source", r.CPU.Source)
+			slog.Info("CPU temperature source", "helper", "nvpair-sensors",
+				"helper_version", r.HelperVersion, "source", r.CPU.Source, "package_watts", watts)
 			p.announced = true
 			p.lastNote = ""
 		}
 		return true
 	}
-	p.latest.Store(0)
 	p.announced = false
 	reason := r.Error
 	if reason == "" {
@@ -139,10 +157,26 @@ func (p *cpuTempPoller) note(level slog.Level, key, msg string, args ...any) {
 }
 
 // current returns the latest package temperature, zero when unknown. Safe
-// on a nil poller.
+// on a nil poller and before the first poll.
 func (p *cpuTempPoller) current() uint32 {
+	if s := p.sample(); s != nil {
+		return s.celsius
+	}
+	return 0
+}
+
+// currentPower returns the latest package power draw in whole watts, zero
+// when unknown. Safe on a nil poller and before the first poll.
+func (p *cpuTempPoller) currentPower() float64 {
+	if s := p.sample(); s != nil {
+		return s.watts
+	}
+	return 0
+}
+
+func (p *cpuTempPoller) sample() *cpuSample {
 	if p == nil {
-		return 0
+		return nil
 	}
 	return p.latest.Load()
 }

@@ -17,6 +17,7 @@ import {
     memoryLabel,
     memoryLineValue,
     memoryUsedBytes,
+    showsMemoryLine,
     showsVram
 } from '@/ui/utils/hardware-rows'
 
@@ -200,26 +201,29 @@ describe('unified memory rows', () => {
         expect(memoryLabel(igpu)).toBe('Shared')
         expect(memoryLabel(card)).toBe('VRAM')
 
-        // A shared pool still shows a memory line — it has a real ceiling.
-        // Dropping the line would hide how much the device can reach.
+        // The device-capability rule is unchanged: a shared pool is memory
+        // the device can really reach, unlike the board controller's.
         expect(showsVram(igpu)).toBe(true)
     })
 
-    it('renders the ceiling alone when nothing measured the pool', () => {
+    it('shows no memory line at all when nothing measured the pool', () => {
         const igpu = { vramTotal: 70866960384, memoryPool: MEMORY_POOL_UNIFIED }
-        // No series for this row -> no figure -> no numerator.
+        // No series for this row -> no figure -> no line.
+        //
+        // This retires the "Shared 66 GB" rendering that replaced the
+        // fabricated "VRAM 25.5 GB / 66 GB". A shared ceiling with nothing
+        // measuring it is a constant: it never moves, so it tells a reader
+        // nothing about the device while sitting among readings that do.
         expect(memoryUsedBytes(igpu, null)).toBeNull()
-        expect(memoryLineValue(igpu, null)).toBe('66 GB')
-        // Specifically NOT the two wrong renderings this replaced.
-        expect(memoryLineValue(igpu, null)).not.toContain('0 B /')
-        expect(memoryLineValue(igpu, null)).not.toContain('/')
+        expect(showsMemoryLine(igpu, null)).toBe(false)
     })
 
     it('renders used / total when the device did measure its pool', () => {
         const apu = { vramTotal: 17179869184, memoryPool: MEMORY_POOL_UNIFIED }
         const used = memoryUsedBytes(apu, 18.75)
         expect(used).toBe(3221225472)
-        expect(memoryLineValue(apu, used)).toBe('3 GB / 16 GB')
+        expect(showsMemoryLine(apu, used)).toBe(true)
+        expect(memoryLineValue(apu, used!)).toBe('3 GB / 16 GB')
         expect(memoryLabel(apu)).toBe('Shared')
     })
 
@@ -229,8 +233,18 @@ describe('unified memory rows', () => {
         // arrives. Narrowing the fix to unified rows is the point.
         const card = { vramTotal: 17179869184 }
         expect(memoryUsedBytes(card, null)).toBe(0)
+        expect(showsMemoryLine(card, 0)).toBe(true)
         expect(memoryLineValue(card, 0)).toBe('0 B / 16 GB')
         expect(memoryUsedBytes(card, 12.5)).toBe(2147483648)
+    })
+
+    it('keeps no memory line for the rows that never had one', () => {
+        // The device-capability rule still comes first, and a row that has
+        // no memory is refused whatever figure is passed for it.
+        const board = { kind: 'board', vramTotal: 0 }
+        const accelerator = { kind: 'npu', vramTotal: 0 }
+        expect(showsMemoryLine(board, 0)).toBe(false)
+        expect(showsMemoryLine(accelerator, 0)).toBe(false)
     })
 
     it('plots no VRAM ring for a unified row with no figure, and keeps every other ring', () => {
@@ -263,7 +277,9 @@ describe('unified memory rows', () => {
             cpuUtilization: sample(4),
             memoryUsage: sample(38),
             gpuTemperature: [],
-            cpuTemperature: 53
+            cpuTemperature: 53,
+            gpuPower: [],
+            cpuPower: 0
         }
 
         // iGPU: utilization only. A2: utilization + VRAM.

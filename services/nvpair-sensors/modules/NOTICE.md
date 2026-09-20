@@ -24,9 +24,13 @@ release, never rebuilt locally.
 ## `IntelMSR.bin` — the CPU package temperature
 
 Exposes `ioctl_read_msr` / `ioctl_write_msr` over an allow list of thermal,
-power and frequency registers. `nvpair-sensors` reads three of them
-(`IA32_TEMPERATURE_TARGET`, `IA32_PACKAGE_THERM_STATUS`, `IA32_THERM_STATUS`)
-and writes none.
+power and frequency registers. `nvpair-sensors` reads four of them and writes
+none: `IA32_TEMPERATURE_TARGET` (0x1A2) and `IA32_PACKAGE_THERM_STATUS` (0x1B1)
+for the package temperature, and `MSR_RAPL_POWER_UNIT` (0x606) and
+`MSR_PKG_ENERGY_STATUS` (0x611) for the package power draw. All four are on the
+module's `is_allowed_msr_read` list; the write list is much narrower and
+contains none of them. `IA32_THERM_STATUS` (0x19C) is the per-core register and
+is declared but not read — the package one is what this helper reports.
 
 ## `LpcIO.bin` — the motherboard sensors
 

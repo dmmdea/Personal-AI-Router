@@ -5,6 +5,7 @@ package main
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +23,11 @@ type gpuStat struct {
 	// TemperatureC is filled only by sources that expose a device thermal
 	// readout (the Linux accelerator sampler); zero means unavailable.
 	TemperatureC uint32
+	// PowerWatts is filled only by sources that meter the device (nvidia-smi
+	// power.draw, the amdgpu hwmon PPT input); zero means unavailable, and
+	// the omitempty tag on GPUInfo.PowerWatts turns that back into an absent
+	// field rather than a device that claims to draw nothing.
+	PowerWatts float64
 }
 
 // statsSnapshot is the dynamic bundle the HTTP handler reads without locking.
@@ -50,8 +56,12 @@ type statsSnapshot struct {
 	CPUUtilPct   uint32
 	// CPUTempC is the CPU package temperature in whole degrees Celsius, zero
 	// when the host has no driverless source for it (see cputemp_linux.go).
-	CPUTempC     uint32
-	MemUsedBytes uint64
+	CPUTempC uint32
+	// CPUPowerWatts is the CPU package power draw in whole watts, zero when
+	// the host exposes no readable energy counter — which is most Linux
+	// hosts, where the powercap counter is root-only (see cpupower_linux.go).
+	CPUPowerWatts float64
+	MemUsedBytes  uint64
 }
 
 // applyGPUStats publishes a usable GPU sample or preserves the last usable
@@ -66,6 +76,29 @@ func applyGPUStats(previous statsSnapshot, next *statsSnapshot, sampled map[stri
 	}
 	next.GPU = sampled
 	next.GPUSampledAt = sampledAt
+}
+
+// parseWatts decodes one power reading into whole watts.
+//
+// nvidia-smi prints power.draw with two decimals under --format=csv,nounits
+// ("6.89") and "[N/A]" for a card that does not meter itself, a driver that
+// will not say, and several virtualized SKUs. Anything that is not a finite,
+// non-negative number is rejected rather than published as 0, because a zero
+// renders as "this device is drawing no power" — a claim, and a wrong one on
+// a card whose meter simply is not there.
+//
+// Whole watts is the published resolution: the node inventory is a display
+// surface, the reading moves by more than a watt between two ticks anyway,
+// and a fractional value would only produce noisier change events downstream.
+//
+// Lives in the platform-neutral file so the Linux collector and the Windows
+// nvidia-smi poller decode the same text the same way.
+func parseWatts(s string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0, false
+	}
+	return math.Round(v), true
 }
 
 // parseEngineInstance pulls the adapter-LUID key and the engine-type tag

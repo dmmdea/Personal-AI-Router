@@ -88,19 +88,80 @@ export function memoryLabel(row: HardwareRow): string {
 }
 
 /**
- * The value beside that label: "<used> / <total>" when the node reported a
- * used figure, and "<total>" alone when it did not.
+ * Whether a row shows a memory line at all, and — as a type predicate — that
+ * the used figure passed in is a real number when it does.
  *
- * The second form is the whole point. A shared-pool device whose driver counts
- * nothing (an Intel iGPU, a Mali GPU, an RKNPU) sends a ceiling and no usage,
- * and the honest rendering of that is the ceiling — not "0 B / 66 GB", which
- * asserts an idle GPU, and not the host's own usage, which asserts a busy one.
- * A device that DOES measure itself (an AMD APU, an Apple Silicon GPU, a DGX
- * Spark part) keeps the full form, still labelled "Shared".
+ * Two rules, in order. A device with no memory to speak of never had one: the
+ * motherboard controller, and an accelerator that reported no capacity.
+ *
+ * The second rule is newer, and it retires the "Shared <total>" line. A
+ * shared-pool device that measures nothing — an Intel iGPU, a Mali GPU, an
+ * RKNPU — publishes only a ceiling, and a ceiling on its own is a static
+ * number that never moves: it sits among live readings looking like one,
+ * while saying nothing about what the device is doing. So such a row now
+ * shows usage and temperature and no memory line, and a shared pool the
+ * device DOES measure (an AMD APU, an Apple Silicon GPU, a DGX Spark part)
+ * keeps the full "Shared <used> / <total>". Dedicated rows are untouched:
+ * their used figure is always a number, 0 included, which is a real reading.
  */
-export function memoryLineValue(row: HardwareRow, usedBytes: number | null): string {
-    const total = formatBytes(row.vramTotal, 1)
-    return usedBytes === null ? total : `${formatBytes(usedBytes, 1)} / ${total}`
+export function showsMemoryLine(row: HardwareRow, usedBytes: number | null): usedBytes is number {
+    return usedBytes !== null && showsVram(row)
+}
+
+/**
+ * The value beside that label: "<used> / <total>".
+ *
+ * Only ever called for a row that has a used figure — see showsMemoryLine,
+ * which is the guard that establishes it.
+ */
+export function memoryLineValue(row: HardwareRow, usedBytes: number): string {
+    return `${formatBytes(usedBytes, 1)} / ${formatBytes(row.vramTotal, 1)}`
+}
+
+/**
+ * The thermal/power line for a device row, or null when it reports neither.
+ *
+ * Temperature leads and power rides in parentheses beside it — "50 °C (200 W)"
+ * — because they describe the same thing and two separate rows for one device
+ * state reads as two measurements. A device that is metered but has no thermal
+ * readout gets a line of its own instead, so the wattage is not lost with the
+ * temperature it would have hung off.
+ *
+ * Zero means "nothing measured this" on both, never "cold" or "drawing
+ * nothing": node-info omits either field wherever it has no source, and a
+ * literal 0 arriving here is that omission (see shared/types/metrics.ts).
+ */
+export function thermalLine(
+    temperatureC: number,
+    powerWatts: number
+): { label: string; value: string } | null {
+    const watts = formatWatts(powerWatts)
+    if (temperatureC > 0) {
+        return {
+            label: 'Temp',
+            value: watts ? `${temperatureC} °C (${watts})` : `${temperatureC} °C`
+        }
+    }
+    return watts ? { label: 'Power', value: watts } : null
+}
+
+/**
+ * Whole watts with a unit, or "" when there is no reading. Rounded because
+ * the services publish whole watts and a decimal here would only imply a
+ * precision the meters are not reporting.
+ */
+export function formatWatts(powerWatts: number): string {
+    return powerWatts > 0 ? `${Math.round(powerWatts)} W` : ''
+}
+
+/**
+ * The trailing "· 55 °C (140 W)" on the CPU's single summary line, or "" when
+ * the host reports neither. Same precedence as thermalLine, flattened into
+ * one line because the CPU has one.
+ */
+export function cpuThermalSuffix(temperatureC: number, powerWatts: number): string {
+    const line = thermalLine(temperatureC, powerWatts)
+    return line ? ` · ${line.value}` : ''
 }
 
 /**
@@ -109,9 +170,10 @@ export function memoryLineValue(row: HardwareRow, usedBytes: number | null): str
  *
  * The bridge emits no VRAM series for a unified row the node did not measure
  * (see reportsMemoryUsage in electron/service-bridge/modular-state.ts), so a
- * missing series on such a row means "unmeasured" and yields null. On a row
- * with dedicated memory a missing series only ever means "no sample yet", and
- * it keeps reading 0 the way it always has rather than losing its line.
+ * missing series on such a row means "unmeasured" and yields null — which
+ * showsMemoryLine then turns into no memory line at all. On a row with
+ * dedicated memory a missing series only ever means "no sample yet", and it
+ * keeps reading 0 the way it always has rather than losing its line.
  */
 export function memoryUsedBytes(row: HardwareRow, usagePercent: number | null): number | null {
     if (usagePercent === null) return isUnifiedMemory(row) ? null : 0
