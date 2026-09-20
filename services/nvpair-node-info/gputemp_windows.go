@@ -134,32 +134,22 @@ func adapterAddressForLuid(low uint32, high int32) (string, bool) {
 	return pciAddressKey(addr.BusNumber, addr.DeviceNumber, addr.FunctionNumber), true
 }
 
-// luidsByPCIAddress enumerates the DXGI adapters once more (same filters as
-// detectGPUs) and returns PCI address -> PDH LUID key.
+// luidsByPCIAddress enumerates the DXGI adapters once more and returns
+// PCI address -> PDH LUID key.
+//
+// It deliberately does NOT apply the DirectX-registry LUID gate that
+// detectGPUs runs (selectPhysicalAdapters). This map only answers "which
+// adapter is this nvidia-smi row", so an entry nothing ever looks up is
+// harmless, while a missing entry silently drops a real card's temperature —
+// including for an adapter recovered after a stale-registry boot, whose LUID
+// is in this map exactly because the gate was never consulted here. Which
+// adapters get reported at all stays detectGPUs' decision.
 func luidsByPCIAddress() map[string]string {
-	var factory unsafe.Pointer
-	hr, _, _ := procCreateDXGIFactory1.Call(
-		uintptr(unsafe.Pointer(&iidIDXGIFactory1)),
-		uintptr(unsafe.Pointer(&factory)),
-	)
-	if hr != 0 || factory == nil {
-		return nil
-	}
-	defer comRelease(factory)
-	out := map[string]string{}
-	for i := uint32(0); ; i++ {
-		adapter, hr := enumAdapters1(factory, i)
-		if uint32(hr) == dxgiErrorNotFound || hr != 0 || adapter == nil {
-			break
-		}
-		var desc dxgiAdapterDesc1
-		descHR := getDesc1(adapter, &desc)
-		comRelease(adapter)
-		if descHR != 0 || desc.Flags&dxgiAdapterFlagSoftware != 0 {
-			continue
-		}
-		if addr, ok := adapterAddressForLuid(desc.AdapterLuidLow, desc.AdapterLuidHigh); ok {
-			out[addr] = luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh)
+	candidates := enumerateAdapterCandidates()
+	out := make(map[string]string, len(candidates))
+	for _, c := range candidates {
+		if addr, ok := adapterAddressForLuid(c.luidLow, c.luidHigh); ok {
+			out[addr] = c.gpu.statsKey
 		}
 	}
 	return out
@@ -205,7 +195,10 @@ func parseNvidiaTemperatures(out string) map[string]uint32 {
 // gpuTempPoller owns the slow nvidia-smi loop and publishes LUID key ->
 // degrees atomically for the PDH tick to merge.
 type gpuTempPoller struct {
-	byAddress   map[string]string // PCI address -> LUID key, resolved once
+	// byAddress maps PCI address -> LUID key. Resolved at start and re-resolved
+	// by poll() when a reading arrives for an address it does not know; only the
+	// poll goroutine ever touches it.
+	byAddress   map[string]string
 	latest      atomic.Pointer[map[string]uint32]
 	unavailable atomic.Bool
 	stop        chan struct{}
@@ -219,7 +212,7 @@ func startGPUTempPoller() *gpuTempPoller {
 		done:      make(chan struct{}),
 	}
 	if len(p.byAddress) == 0 {
-		slog.Info("no adapter PCI addresses resolvable; GPU temperature will not be reported")
+		slog.Info("no adapter PCI addresses resolvable yet; retrying when a temperature reading arrives")
 	}
 	go p.run()
 	return p
@@ -240,8 +233,16 @@ func (p *gpuTempPoller) run() {
 	}
 }
 
+// poll reads nvidia-smi and republishes the LUID-keyed temperature map.
+//
+// byAddress is resolved once at start because LUIDs are fixed for the life of
+// a boot, but a reading can still arrive for an address it does not know: the
+// display driver may not have been ready when the poller started, or an
+// adapter appeared later (hot-plug, or a GPU recovered by the inventory
+// retry). One re-resolve per poll covers both without re-enumerating DXGI on
+// every tick.
 func (p *gpuTempPoller) poll() {
-	if p.unavailable.Load() || len(p.byAddress) == 0 {
+	if p.unavailable.Load() {
 		return
 	}
 	temps, err := nvidiaSmiTemperatures()
@@ -252,8 +253,15 @@ func (p *gpuTempPoller) poll() {
 		return
 	}
 	byLUID := make(map[string]uint32, len(temps))
+	reResolved := false
 	for addr, c := range temps {
-		if luid, ok := p.byAddress[addr]; ok {
+		luid, ok := p.byAddress[addr]
+		if !ok && !reResolved {
+			reResolved = true
+			p.byAddress = luidsByPCIAddress()
+			luid, ok = p.byAddress[addr]
+		}
+		if ok {
 			byLUID[luid] = c
 		}
 	}
