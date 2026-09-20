@@ -555,6 +555,31 @@ body .os-scrollbar {
     min-width: 0;
 }
 
+/*
+ * Overview node list.
+ *
+ * Cards lay out as an auto-fitting grid instead of one capped column, so a wide
+ * window carries several side by side rather than leaving most of itself empty.
+ * The track minimum is what an expanded card needs to keep its performance
+ * chart and legend side by side: that panel is its own query container and
+ * stacks them at or below 720px of card content width, and `.node-card` adds
+ * 2 x 16px of padding around it, so 780px leaves a little headroom over the
+ * 752px where it would flip.
+ *
+ * With the list's 12px gap that puts the column breaks at 1572px, 2364px and
+ * 3156px of grid width. `min()` collapses the track to the container on
+ * anything narrower than one card, which is what stops a narrow window from
+ * scrolling sideways.
+ */
+.node-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(780px, 100%), 1fr));
+    /* Each card keeps its own height. Stretching is the grid default, and it
+       would inflate every card in a row to the height of an expanded
+       neighbour, leaving tall empty panels beside it. */
+    align-items: start;
+}
+
 .node-card {
     @apply h-auto;
     @apply w-full;
