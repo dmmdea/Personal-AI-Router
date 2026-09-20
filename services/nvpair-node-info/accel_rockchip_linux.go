@@ -106,16 +106,18 @@ func detectRockchipNPU() []GPUInfo {
 }
 
 // rknpuRow builds the inventory row. Memory is unified (the NPU works out of
-// system DRAM), so the row carries the system-memory total and lets response
-// assembly fill its used bytes from the system-memory sample, like every other
-// unified-memory row.
+// system DRAM), so the row carries the system-memory total stamped as a shared
+// pool. It carries no used figure, for the reason maliRow gives: the RKNPU
+// driver reports no allocation of its own, and the host's RAM usage is not the
+// NPU's — that substitution is what had an 8 GB board claiming the NPU held
+// 1.1 GB of memory it had never asked for.
 func rknpuRow(dev *rknpuDevice, cores int, memTotal uint64) GPUInfo {
 	return GPUInfo{
-		Name:                  rknpuProductName(dev.compatible, cores),
-		Kind:                  noderec.GPUKindAccelerator,
-		VramBytes:             memTotal,
-		statsKey:              rknpuStatsPrefix + dev.node,
-		usesSystemMemoryUsage: true,
+		Name:       rknpuProductName(dev.compatible, cores),
+		Kind:       noderec.GPUKindAccelerator,
+		VramBytes:  memTotal,
+		statsKey:   rknpuStatsPrefix + dev.node,
+		MemoryPool: noderec.GPUMemoryPoolUnified,
 	}
 }
 

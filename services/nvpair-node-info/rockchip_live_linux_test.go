@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -42,8 +43,8 @@ func TestLiveRockchipNodeInfo(t *testing.T) {
 			gpu = row
 		}
 	}
-	t.Logf("GPU row: name=%q stats_key=%q vram_bytes=%d uma=%v", gpu.Name, gpu.statsKey, gpu.VramBytes, gpu.usesSystemMemoryUsage)
-	t.Logf("NPU row: name=%q kind=%q stats_key=%q vram_bytes=%d uma=%v", npu.Name, npu.Kind, npu.statsKey, npu.VramBytes, npu.usesSystemMemoryUsage)
+	t.Logf("GPU row: name=%q stats_key=%q vram_bytes=%d memory_pool=%q", gpu.Name, gpu.statsKey, gpu.VramBytes, gpu.MemoryPool)
+	t.Logf("NPU row: name=%q kind=%q stats_key=%q vram_bytes=%d memory_pool=%q", npu.Name, npu.Kind, npu.statsKey, npu.VramBytes, npu.MemoryPool)
 
 	if !strings.Contains(gpu.Name, "Mali-G610") {
 		t.Errorf("GPU name = %q, want it to contain Mali-G610", gpu.Name)
@@ -55,8 +56,11 @@ func TestLiveRockchipNodeInfo(t *testing.T) {
 		t.Errorf("NPU name = %q, want it to contain RK3588", npu.Name)
 	}
 	for _, row := range []GPUInfo{gpu, npu} {
-		if !row.usesSystemMemoryUsage || row.VramBytes == 0 {
-			t.Errorf("%q: unified memory not reported (uma=%v vram_bytes=%d)", row.Name, row.usesSystemMemoryUsage, row.VramBytes)
+		if row.MemoryPool != noderec.GPUMemoryPoolUnified || row.VramBytes == 0 {
+			t.Errorf("%q: unified pool not reported (memory_pool=%q vram_bytes=%d)", row.Name, row.MemoryPool, row.VramBytes)
+		}
+		if row.usesSystemMemoryUsage {
+			t.Errorf("%q: still borrows the board's RAM usage as its own", row.Name)
 		}
 	}
 
@@ -105,9 +109,31 @@ func TestLiveRockchipNodeInfo(t *testing.T) {
 		t.Error("CPU temperature is 0; no thermal zone matched on a board that publishes soc-thermal")
 	}
 	if snap.MemUsedBytes == 0 {
-		t.Error("system memory used is 0; the unified-memory rows would report no VRAM usage")
+		t.Error("system memory used is 0; the node's memory object would report nothing")
 	}
 
 	body := buildResponseAt(rows, cpu, detectMemoryTotal(), snap, "", nil, time.Now())
 	t.Logf("/v1/node-info body: %s", body)
+
+	// The wire shape, on the board that showed the defect: both rows carry the
+	// shared-pool marker and neither carries a used figure. snap.MemUsedBytes
+	// is non-zero above, so a row that still mapped it would be visible here.
+	var live struct {
+		GPUs []map[string]any `json:"GPUs"`
+	}
+	if err := json.Unmarshal(body, &live); err != nil {
+		t.Fatalf("unmarshal live response: %v", err)
+	}
+	if len(live.GPUs) != len(rows) {
+		t.Fatalf("response carries %d rows, want %d", len(live.GPUs), len(rows))
+	}
+	for _, row := range live.GPUs {
+		name, _ := row["name"].(string)
+		if got := row["memory_pool"]; got != noderec.GPUMemoryPoolUnified {
+			t.Errorf("%q: memory_pool = %v, want %q", name, got, noderec.GPUMemoryPoolUnified)
+		}
+		if _, present := row["vram_used_bytes"]; present {
+			t.Errorf("%q: vram_used_bytes present (%v); nothing on this SoC measures it", name, row["vram_used_bytes"])
+		}
+	}
 }

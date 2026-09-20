@@ -39,6 +39,17 @@ type GPUInfo struct {
 	// TemperatureCelsius is the device's thermal readout when its driver
 	// exposes one (accelerators do); zero drops it from JSON.
 	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+	// MemoryPool is noderec.GPUMemoryPoolUnified on a device whose VramBytes
+	// is a pool it shares with the host (every integrated GPU, the Mali and
+	// RKNPU rows, an AMD APU's carve-out + GTT, an nvidia UMA part) and empty
+	// on a discrete card, which has memory of its own.
+	//
+	// It says nothing about VramUsedBytes. A unified row reports used bytes
+	// only when its own driver measures them; where no such source exists the
+	// field stays absent, because the host's RAM usage is the CPU's number and
+	// publishing it as the device's would claim an iGPU is holding tens of
+	// gigabytes it never allocated.
+	MemoryPool string `json:"memory_pool,omitempty"`
 
 	// statsKey is the opaque per-adapter identifier used to join this
 	// static GPUInfo against statsCollector.Snapshot() results. Its
@@ -50,9 +61,19 @@ type GPUInfo struct {
 	// Unexported + json:"-" so it never travels over the wire.
 	statsKey string `json:"-"`
 
-	// usesSystemMemoryUsage is set by Linux static detection when nvidia-smi
-	// cannot report GPU memory usage. Response assembly then maps the
-	// independently collected system-memory usage onto VramUsedBytes.
+	// usesSystemMemoryUsage makes response assembly map the independently
+	// collected system-memory usage onto VramUsedBytes. It is set by ONE
+	// detector — the nvidia UMA branch in gpu_linux.go — and must stay that
+	// way: on a Grace-Blackwell part the CPU and the GPU allocate from one
+	// physical pool through one allocator, so the host figure is genuinely
+	// what the accelerator is drawing from, and nvidia-smi answers [N/A]
+	// precisely because there is no separate GPU number to give.
+	//
+	// It is NOT the marker for "this row's capacity is shared" — MemoryPool is
+	// (and every unified row sets that). An integrated GPU carves a small
+	// aperture out of a pool the CPU otherwise owns; mapping whole-host usage
+	// onto it reported a Coffee Lake iGPU as using 25.5 GB while it held a
+	// framebuffer, which is why those rows no longer set this flag.
 	usesSystemMemoryUsage bool `json:"-"`
 }
 
@@ -176,6 +197,10 @@ func handleClusterIdentity(msg applog.StdinMessage, identity *clusterIdentity) {
 // drop from JSON. GPUs explicitly marked usesSystemMemoryUsage are the
 // exception: their VRAM-used value is the independently sampled system-memory
 // usage, so it remains available even when dynamic nvidia-smi collection is not.
+// Only the nvidia UMA rows carry that flag. Every other unified-memory row
+// (Intel iGPU, Mali, RKNPU) is published with MemoryPool set and no used figure
+// at all, because nothing on those hosts measures what the device itself holds
+// and an omitted number is the honest answer where a substituted one is a claim.
 //
 // cpuStatic is nil when static CPU introspection failed; memTotal is zero when
 // physical-memory introspection failed. Both conditions omit their respective

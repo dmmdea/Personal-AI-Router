@@ -10,6 +10,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"nvpair-shared/noderec"
 )
 
 // Live checks against real hardware. Both are gated on an environment
@@ -30,8 +33,8 @@ func TestLiveIntelNodeInfo(t *testing.T) {
 
 	intel := detectIntelGPUs(drmClassDir)
 	for _, row := range intel {
-		t.Logf("Intel row: name=%q stats_key=%q vram_bytes=%d uma=%v",
-			row.Name, row.statsKey, row.VramBytes, row.usesSystemMemoryUsage)
+		t.Logf("Intel row: name=%q stats_key=%q vram_bytes=%d memory_pool=%q uma=%v",
+			row.Name, row.statsKey, row.VramBytes, row.MemoryPool, row.usesSystemMemoryUsage)
 	}
 	if len(intel) == 0 {
 		t.Fatal("detectIntelGPUs found nothing on a host that has an Intel GPU")
@@ -42,9 +45,47 @@ func TestLiveIntelNodeInfo(t *testing.T) {
 	if !strings.HasPrefix(intel[0].statsKey, intelStatsKeyPrefix) {
 		t.Errorf("statsKey = %q, want the %q prefix", intel[0].statsKey, intelStatsKeyPrefix)
 	}
-	if !intel[0].usesSystemMemoryUsage || intel[0].VramBytes == 0 {
-		t.Errorf("integrated GPU not reported as unified memory (uma=%v vram_bytes=%d)",
-			intel[0].usesSystemMemoryUsage, intel[0].VramBytes)
+	if intel[0].MemoryPool != noderec.GPUMemoryPoolUnified || intel[0].VramBytes == 0 {
+		t.Errorf("integrated GPU not reported as a unified pool (memory_pool=%q vram_bytes=%d)",
+			intel[0].MemoryPool, intel[0].VramBytes)
+	}
+	// The measured defect, asserted on the hardware that showed it: this row
+	// must reach the wire with a shared-pool ceiling and NO used figure. The
+	// host's RAM usage went here before, and the card read "VRAM 25.5 GB /
+	// 66 GB" while the iGPU held a framebuffer.
+	if intel[0].usesSystemMemoryUsage {
+		t.Error("Intel row still borrows the host's memory usage")
+	}
+	// Assemble the body a client actually receives, off the real collector:
+	// the flag lives in the inventory but the omission happens in response
+	// assembly, so only this proves the wire shape.
+	collector := startStatsCollector()
+	t.Cleanup(collector.Stop)
+	time.Sleep(1500 * time.Millisecond)
+	liveBody := buildResponseAt(detectGPUs(), detectCPU(), detectMemoryTotal(), collector.Snapshot(), "", nil, time.Now())
+	var live struct {
+		GPUs []map[string]any `json:"GPUs"`
+	}
+	if err := json.Unmarshal(liveBody, &live); err != nil {
+		t.Fatalf("unmarshal live response: %v", err)
+	}
+	t.Logf("live response GPUs: %s", liveBody)
+	var sawIntel bool
+	for _, row := range live.GPUs {
+		name, _ := row["name"].(string)
+		if !strings.Contains(name, "UHD Graphics") && !strings.Contains(name, "Intel") {
+			continue
+		}
+		sawIntel = true
+		if got := row["memory_pool"]; got != noderec.GPUMemoryPoolUnified {
+			t.Errorf("%q: memory_pool = %v, want %q", name, got, noderec.GPUMemoryPoolUnified)
+		}
+		if _, present := row["vram_used_bytes"]; present {
+			t.Errorf("%q: vram_used_bytes present (%v); an Intel iGPU row must omit it", name, row["vram_used_bytes"])
+		}
+	}
+	if !sawIntel {
+		t.Error("no Intel row in the assembled response")
 	}
 	// The ceiling, verified on the hardware rather than assumed: i915 has no
 	// sysfs busy counter and an iGPU has no sensor, so both fields stay absent.

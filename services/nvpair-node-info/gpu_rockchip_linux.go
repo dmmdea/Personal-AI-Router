@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 // Rockchip RK35xx integrated-GPU (Arm Mali) inventory and sampling, plus the
@@ -33,8 +35,10 @@ import (
 //     read through the same helper the CPU package sensor uses.
 //
 // Memory is unified — the GPU has no dedicated VRAM, it shares system DRAM — so
-// the row is marked usesSystemMemoryUsage and carries the system-memory total
-// as VramBytes, exactly like the nvidia UMA branch in gpu_linux.go.
+// the row carries the system-memory total as VramBytes and is stamped
+// noderec.GPUMemoryPoolUnified. It reports no used figure: the Mali driver
+// exposes no allocation counter, and the host's RAM usage describes every
+// process on the board rather than what the GPU is holding.
 //
 // Sampling runs in one goroutine per device rather than inside the collector
 // tick: sysfs reads are cheap, but a wedged driver node must never be able to
@@ -133,15 +137,17 @@ func detectRockchipGPUs() []GPUInfo {
 	return []GPUInfo{row}
 }
 
-// maliRow builds the inventory row. VramBytes is the system-memory total and
-// usesSystemMemoryUsage makes response assembly fill VramUsedBytes from the
-// system-memory sample — the same contract the nvidia UMA rows use.
+// maliRow builds the inventory row. VramBytes is the system-memory total, which
+// MemoryPool marks as a pool shared with the host so no consumer reads it as
+// dedicated VRAM. VramUsedBytes is deliberately left for the response to omit:
+// unlike the nvidia UMA parts, nothing on this SoC measures the GPU's share of
+// that pool, and substituting the host's would be an invented number.
 func maliRow(dev maliDevice, memTotal uint64) GPUInfo {
 	return GPUInfo{
-		Name:                  dev.name,
-		VramBytes:             memTotal,
-		statsKey:              dev.statsKey(),
-		usesSystemMemoryUsage: true,
+		Name:       dev.name,
+		VramBytes:  memTotal,
+		statsKey:   dev.statsKey(),
+		MemoryPool: noderec.GPUMemoryPoolUnified,
 	}
 }
 

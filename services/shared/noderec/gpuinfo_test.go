@@ -95,3 +95,77 @@ func TestGPUInfoWireShape(t *testing.T) {
 		t.Fatalf("accelerator row must not report VRAM: %s", accel)
 	}
 }
+
+// TestGPUInfoMemoryPoolWireShape pins the unified-memory contract at the
+// package every consumer decodes through.
+//
+// The field exists because a shared capacity and a dedicated one are not the
+// same claim, and nothing on the wire used to distinguish them: an Intel iGPU
+// published the host's 66 GB as "vram_bytes" beside the host's 25.5 GB as
+// "vram_used_bytes", and clients rendered "VRAM 25.5 GB / 66 GB" for a GPU
+// that had allocated a framebuffer. Two properties keep that from returning.
+//
+// First, additive: a discrete row must serialize exactly as it did before, so
+// a consumer that has never heard of memory_pool is unaffected. Second,
+// orthogonal: the marker says where the CAPACITY comes from and says nothing
+// about usage, so a producer can mark a pool without being obliged to invent
+// a figure for what is spent in it — which is the whole point.
+func TestGPUInfoMemoryPoolWireShape(t *testing.T) {
+	discrete, _ := json.Marshal(GPUInfo{
+		Name: "NVIDIA GeForce RTX 5060 Ti", VramBytes: 17179869184,
+		VramUsedBytes: 2147483648, UtilizationPercent: 41,
+	})
+	if strings.Contains(string(discrete), "memory_pool") {
+		t.Fatalf("a discrete row must not carry memory_pool: %s", discrete)
+	}
+
+	// A shared pool with nothing measuring what the device holds: ceiling
+	// present, used figure absent. This is the Intel iGPU / Mali / RKNPU shape.
+	unmeasured, _ := json.Marshal(GPUInfo{
+		Name:      "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)",
+		VramBytes: 70866960384, MemoryPool: GPUMemoryPoolUnified,
+	})
+	if !strings.Contains(string(unmeasured), `"memory_pool":"unified"`) {
+		t.Fatalf("unified row missing memory_pool: %s", unmeasured)
+	}
+	if strings.Contains(string(unmeasured), "vram_used_bytes") {
+		t.Fatalf("a unified row with no measurement must omit vram_used_bytes: %s", unmeasured)
+	}
+
+	// A shared pool whose device DOES measure its own allocation: an AMD APU,
+	// an Apple Silicon GPU, a DGX Spark. Both keys travel.
+	measured, _ := json.Marshal(GPUInfo{
+		Name:      "AMD Radeon Vega Graphics (Barcelo, GCN 5.1)",
+		VramBytes: 17179869184, VramUsedBytes: 3221225472,
+		MemoryPool: GPUMemoryPoolUnified,
+	})
+	for _, want := range []string{`"memory_pool":"unified"`, `"vram_used_bytes":3221225472`} {
+		if !strings.Contains(string(measured), want) {
+			t.Fatalf("measured unified row missing %s: %s", want, measured)
+		}
+	}
+
+	// Round-trips: a relay that decodes and re-encodes (the scanner, the
+	// broker) must not drop the marker, because a hop that loses it turns a
+	// shared ceiling back into a "VRAM" figure at the far end.
+	var back GPUInfo
+	if err := json.Unmarshal(unmeasured, &back); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if back.MemoryPool != GPUMemoryPoolUnified {
+		t.Fatalf("MemoryPool did not survive a round trip: %+v", back)
+	}
+	if back.VramUsedBytes != 0 {
+		t.Fatalf("VramUsedBytes = %d, want 0 after decoding a row that omitted it", back.VramUsedBytes)
+	}
+}
+
+// TestGPUMemoryPoolUnifiedValue pins the literal. It is a wire value shared by
+// three Go services and a TypeScript client that compares against its own copy
+// of the string, so renaming the constant must not quietly change what any of
+// them send or match on.
+func TestGPUMemoryPoolUnifiedValue(t *testing.T) {
+	if GPUMemoryPoolUnified != "unified" {
+		t.Fatalf("GPUMemoryPoolUnified = %q, want \"unified\"", GPUMemoryPoolUnified)
+	}
+}

@@ -12,6 +12,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"nvpair-shared/gpunames"
+	"nvpair-shared/noderec"
 )
 
 // Linux Intel GPU inventory, read from the i915 / xe drivers' sysfs nodes.
@@ -50,12 +53,20 @@ import (
 //
 // Memory. An integrated Intel GPU has no dedicated VRAM: it allocates out of
 // system DRAM, exactly like the Mali rows in gpu_rockchip_linux.go. Those rows
-// are therefore marked usesSystemMemoryUsage and carry the system-memory total
-// as VramBytes, so a consumer sees the real ceiling and the real usage instead
-// of a zero. A discrete card reports its own mem_info_vram_total when the
-// driver exposes one; i915 does not expose it for an iGPU (verified on the
-// measured host: the attribute is absent), and an unknown capacity stays 0,
-// which omitempty drops from the wire.
+// carry the system-memory total as VramBytes and are stamped
+// noderec.GPUMemoryPoolUnified, so a consumer can show the real ceiling and
+// still say whose memory it is. A discrete card reports its own
+// mem_info_vram_total when the driver exposes one; i915 does not expose it for
+// an iGPU (verified on the measured host: the attribute is absent), and an
+// unknown capacity stays 0, which omitempty drops from the wire.
+//
+// What an Intel row does NOT carry is a used figure. i915 and xe publish no
+// unprivileged per-device allocation counter, and the host's own RAM usage is
+// not a stand-in for one: the iGPU holds a framebuffer and whatever a compute
+// context mapped, while /proc/meminfo counts every process on the box.
+// Publishing the second as the first had a UHD Graphics 630 reading
+// "VRAM 25.5 GB / 66 GB" on a host whose GPU was doing nothing. An omitted
+// number renders as a shared-pool ceiling instead, which is what is known.
 
 const (
 	// intelPCIVendor is Intel's PCI vendor id as the sysfs attribute spells it.
@@ -66,10 +77,6 @@ const (
 	// "<vendor>:<pci address>" shape as the amdgpu inventory, built by the same
 	// helper (drmPCIStatsKey).
 	intelStatsKeyPrefix = "intel:"
-
-	// intelFallbackName is the vendor-level name an unlisted adapter falls back
-	// to, and the whole name for a card whose device id sysfs could not read.
-	intelFallbackName = "Intel Graphics"
 )
 
 // intelDrivers are the kernel drivers that own a modern Intel GPU: i915 for
@@ -79,67 +86,10 @@ const (
 // GPU to report on, and none of the attributes below would be readable.
 var intelDrivers = map[string]bool{"i915": true, "xe": true}
 
-// intelModel is one known PCI device id: the name to publish, and whether the
-// part is a discrete card (dedicated VRAM) rather than an integrated GPU
-// sharing system DRAM.
-type intelModel struct {
-	name     string
-	discrete bool
-}
-
-// intelModels maps a PCI device id (lowercase hex, no "0x") to the name this
-// service publishes, in the same "<marketing name> (<codename>, <graphics
-// architecture>)" shape the amdgpu table uses, so rows from the two vendors
-// read alike in one node list.
-//
-// Every id was checked against the kernel's own id header
-// (include/drm/intel/pciids.h, which is what i915 and xe bind on) and against
-// the PCI ID Repository's pci.ids for the marketing name — not recalled. Two
-// results worth knowing, because the obvious guess is wrong both times:
-//
-//   - 0x9a60/0x9a68/0x9a70 are INTEL_TGL_GT1_IDS, and pci.ids names them
-//     "TigerLake-H GT1 [UHD Graphics]". They are not Iris Xe. Iris Xe on Tiger
-//     Lake is the GT2 part (0x9a49, 0x9a40), which is listed separately below.
-//   - 0x7d55 is "Meteor Lake-P [Intel Arc Graphics]" but 0x7dd5 is "Meteor
-//     Lake-P [Intel Graphics]" — the same generation, sold under two names
-//     depending on the Xe-core count, so they do not share a string.
-//
-// An unlisted id still produces a row — see intelModelName — so a part
-// released after this table was written is never dropped from the inventory.
-var intelModels = map[string]intelModel{
-	// Gen 9.5 (Coffee Lake). 0x3e91/0x3e92/0x3e98 are CFL-S GT2, 0x3e9b is
-	// CFL-H GT2; all four are sold as UHD Graphics 630.
-	"3e91": {"Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", false},
-	"3e92": {"Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", false},
-	"3e98": {"Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", false},
-	"3e9b": {"Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", false},
-
-	// Xe-LP (Tiger Lake). GT1 is UHD Graphics, GT2 is Iris Xe.
-	"9a60": {"Intel UHD Graphics (Tiger Lake, Xe-LP)", false},
-	"9a68": {"Intel UHD Graphics (Tiger Lake, Xe-LP)", false},
-	"9a70": {"Intel UHD Graphics (Tiger Lake, Xe-LP)", false},
-	"9a40": {"Intel Iris Xe Graphics (Tiger Lake, Xe-LP)", false},
-	"9a49": {"Intel Iris Xe Graphics (Tiger Lake, Xe-LP)", false},
-
-	// Xe-LP (Alder Lake / Raptor Lake).
-	"46a6": {"Intel Iris Xe Graphics (Alder Lake, Xe-LP)", false},
-	"46a8": {"Intel Iris Xe Graphics (Alder Lake, Xe-LP)", false},
-	"46aa": {"Intel Iris Xe Graphics (Alder Lake, Xe-LP)", false},
-	"a7a0": {"Intel Iris Xe Graphics (Raptor Lake, Xe-LP)", false},
-	"a7a1": {"Intel Iris Xe Graphics (Raptor Lake, Xe-LP)", false},
-
-	// Xe-HPG (Alchemist / DG2): the first discrete Arc cards.
-	"56a0": {"Intel Arc A770 (Alchemist, Xe-HPG)", true},
-	"56a1": {"Intel Arc A750 (Alchemist, Xe-HPG)", true},
-
-	// Xe-LPG (Meteor Lake).
-	"7d55": {"Intel Arc Graphics (Meteor Lake, Xe-LPG)", false},
-	"7dd5": {"Intel Graphics (Meteor Lake, Xe-LPG)", false},
-
-	// Xe2 (Lunar Lake integrated, Battlemage discrete).
-	"64a0": {"Intel Arc Graphics 130V/140V (Lunar Lake, Xe2)", false},
-	"e20b": {"Intel Arc B580 (Battlemage, Xe2-HPG)", true},
-}
+// The Intel id -> name table lives in nvpair-shared/gpunames, because the
+// Windows inventory has to reach exactly the same answer from a DXGI
+// adapter's VendorID/DeviceID pair. This file only turns a sysfs device id
+// into the arguments that package takes.
 
 // intelCard is one enumerated Intel adapter: where its attributes live, what
 // it is, and the key its samples are published under.
@@ -151,7 +101,7 @@ type intelCard struct {
 	driver    string // bound kernel driver, "i915" or "xe"
 
 	// discrete marks a card with its own VRAM. An integrated GPU allocates out
-	// of system DRAM and its row is published as unified memory instead.
+	// of system DRAM and its row is published as a unified pool instead.
 	discrete bool
 
 	// statsKey is "intel:<pci address>", the join key between the static row
@@ -182,12 +132,15 @@ func detectIntelGPUs(drmRoot string) []GPUInfo {
 			// invented capacity is worse than an omitted one.
 			row.VramBytes, _ = drmSysfsUint(c.deviceDir, "mem_info_vram_total")
 		} else {
+			// The pool is the host's and nothing here measures the GPU's share
+			// of it, so the row publishes the ceiling and no usage at all.
 			row.VramBytes = systemMemTotal()
-			row.usesSystemMemoryUsage = true
+			row.MemoryPool = noderec.GPUMemoryPoolUnified
 		}
 		slog.Debug("Intel GPU detected",
 			"name", row.Name, "stats_key", row.statsKey, "driver", c.driver,
-			"discrete", c.discrete, "vram_bytes", row.VramBytes)
+			"discrete", c.discrete, "vram_bytes", row.VramBytes,
+			"memory_pool", row.MemoryPool)
 		out = append(out, row)
 	}
 	return out
@@ -269,18 +222,13 @@ func drmDriverName(deviceDir string) string {
 	return ueventValue(readSysfs(filepath.Join(deviceDir, "uevent")), "DRIVER")
 }
 
-// intelModelName resolves a device id to a display name. An unknown id keeps
-// the id in the name rather than being dropped, so a part released after
-// intelModels was written still appears in the inventory and is still
+// intelModelName resolves a sysfs device id to a display name. An unknown id
+// keeps the id in the name rather than being dropped, so a part released after
+// the shared table was written still appears in the inventory and is still
 // identifiable by anyone who can read an lspci line.
 func intelModelName(deviceID string) string {
-	if m, ok := intelModels[deviceID]; ok {
-		return m.name
-	}
-	if deviceID == "" {
-		return intelFallbackName
-	}
-	return intelFallbackName + " (device 0x" + deviceID + ")"
+	id, ok := gpunames.ParseHexID(deviceID)
+	return gpunames.IntelName(id, ok)
 }
 
 // intelDiscrete reports whether this card has dedicated VRAM. A listed part is
@@ -289,8 +237,10 @@ func intelModelName(deviceID string) string {
 // memory. Mirrors amdUnifiedPool's structure so the two vendors' verdicts are
 // reached the same way.
 func intelDiscrete(c intelCard) bool {
-	if m, ok := intelModels[c.deviceID]; ok {
-		return m.discrete
+	if id, ok := gpunames.ParseHexID(c.deviceID); ok {
+		if discrete, known := gpunames.IntelDiscrete(id); known {
+			return discrete
+		}
 	}
 	_, haveVRAM := drmSysfsUint(c.deviceDir, "mem_info_vram_total")
 	return haveVRAM

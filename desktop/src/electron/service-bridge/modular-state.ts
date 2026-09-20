@@ -22,6 +22,7 @@ import {
     MODULAR_SUPERSEDE_MIN_AGE_MS
 } from '@/shared/constants/modular-runtime'
 import { WorkloadStates } from '@/shared/constants/workloads'
+import { MEMORY_POOL_UNIFIED } from '@/shared/constants/hardware'
 import { isEngineType, emptyEngineStatus } from '@/shared/utils/engines'
 import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { workloadKey } from '@/shared/utils/workloads'
@@ -209,6 +210,10 @@ interface ModularGpu {
     // kinds are node-info's to define, and a row this build has not heard of
     // must still reach the UI.
     kind: string
+    // "" when vramBytes is the device's own memory, MEMORY_POOL_UNIFIED when
+    // it is a pool shared with the host. Carried through untouched for the
+    // same reason as kind.
+    memoryPool: string
 }
 
 interface ModularCpu {
@@ -521,7 +526,8 @@ function gpuArrayValue(value: JsonValue | undefined): ModularGpu[] {
             vramUsedBytes: numberValue(obj.vram_used_bytes),
             utilizationPercent: numberValue(obj.utilization_percent),
             temperatureCelsius: numberValue(obj.temperature_celsius),
-            kind: stringValue(obj.kind)
+            kind: stringValue(obj.kind),
+            memoryPool: stringValue(obj.memory_pool)
         })
     }
     return gpus.sort((left, right) => nvidiaGpuRank(left) - nvidiaGpuRank(right))
@@ -552,6 +558,25 @@ function normalizeLastSeen(value: number): number {
     return value < 10_000_000_000 ? value * 1000 : value
 }
 
+/**
+ * Whether this row carries a memory-usage figure of its own.
+ *
+ * A shared pool and a measurement of it are separate facts. A device that
+ * shares the host's memory reports used bytes only when its own driver counts
+ * them (an AMD APU, an Apple Silicon GPU, a DGX Spark part); where nothing
+ * does, node-info omits vram_used_bytes and it arrives here as 0. Treating
+ * that 0 as "using nothing" is the display bug this guards: the service used
+ * to substitute the HOST's memory usage there, and an idle integrated GPU was
+ * shown holding 25.5 GB of the box's 66 GB.
+ *
+ * A row with dedicated memory always has a figure — 0 from a discrete card is
+ * a real reading, or a pre-first-sample gap the chart already handles — so the
+ * question is only ever asked of a unified row.
+ */
+function reportsMemoryUsage(gpu: ModularGpu): boolean {
+    return !(gpu.memoryPool === MEMORY_POOL_UNIFIED && gpu.vramUsedBytes === 0)
+}
+
 function sameGpu(left: ModularGpu, right: ModularGpu): boolean {
     return (
         left.name === right.name &&
@@ -559,7 +584,8 @@ function sameGpu(left: ModularGpu, right: ModularGpu): boolean {
         left.vramUsedBytes === right.vramUsedBytes &&
         left.utilizationPercent === right.utilizationPercent &&
         left.temperatureCelsius === right.temperatureCelsius &&
-        left.kind === right.kind
+        left.kind === right.kind &&
+        left.memoryPool === right.memoryPool
     )
 }
 
@@ -657,7 +683,8 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
                 id: `${node.id}:gpu:${index}`,
                 name: gpu.name,
                 vramTotal: gpu.vramBytes,
-                ...(gpu.kind ? { kind: gpu.kind } : {})
+                ...(gpu.kind ? { kind: gpu.kind } : {}),
+                ...(gpu.memoryPool ? { memoryPool: gpu.memoryPool } : {})
             })),
             ram: node.memory?.totalBytes ?? 0,
             storage: [],
@@ -684,10 +711,25 @@ function toMetrics(node: ModularNode): NodeItemMetrics {
             id: `${node.id}:gpu:${index}`,
             value: gpu.utilizationPercent
         })),
-        gpuVramUsage: node.gpus.map((gpu, index) => ({
-            id: `${node.id}:gpu:${index}`,
-            value: gpu.vramBytes > 0 ? (gpu.vramUsedBytes / gpu.vramBytes) * 100 : 0
-        })),
+        // A row whose node reports NO used figure gets no series at all,
+        // rather than a series of zeroes. node-info omits vram_used_bytes for
+        // a shared-pool device nothing can measure (an Intel iGPU, a Mali GPU,
+        // an RKNPU), and a 0% line on the chart is not a neutral placeholder:
+        // it draws a flat baseline that reads as "this GPU is holding
+        // nothing", which is a measurement the node never made.
+        //
+        // Keyed by id rather than position, because consumers can no longer
+        // index this array by topology index once entries can be missing.
+        gpuVramUsage: node.gpus.flatMap((gpu, index) =>
+            reportsMemoryUsage(gpu)
+                ? [
+                      {
+                          id: `${node.id}:gpu:${index}`,
+                          value: gpu.vramBytes > 0 ? (gpu.vramUsedBytes / gpu.vramBytes) * 100 : 0
+                      }
+                  ]
+                : []
+        ),
         gpuTemperature: node.gpus.map((gpu, index) => ({
             id: `${node.id}:gpu:${index}`,
             value: gpu.temperatureCelsius

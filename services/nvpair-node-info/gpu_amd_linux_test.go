@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 // The amdgpu inventory and sampler are pure sysfs readers, so every case below
@@ -172,6 +174,49 @@ func TestDetectAMDGPUsAPUCapacityIsVRAMPlusGTT(t *testing.T) {
 	if got.usesSystemMemoryUsage {
 		t.Error("usesSystemMemoryUsage set: amdgpu reports its own usage, /proc/meminfo must not override it")
 	}
+	// The capacity is a pool the CPU shares, so the row says so — and unlike
+	// the sysfs-only unified rows this one still publishes a used figure,
+	// because the driver measures vram_used + gtt_used for this device.
+	if got.MemoryPool != noderec.GPUMemoryPoolUnified {
+		t.Errorf("MemoryPool = %q, want %q: an APU's capacity is carve-out + GTT out of system RAM",
+			got.MemoryPool, noderec.GPUMemoryPoolUnified)
+	}
+}
+
+// TestDetectAMDGPUsAPURowKeepsItsOwnUsedFigure is the APU's place in the
+// unified-memory contract, asserted on the wire. Every other shared-pool row
+// in this service omits vram_used_bytes because nothing measures it; the APU
+// is the exception that must NOT be swept up with them, and the number it
+// publishes has to be the driver's rather than the host's.
+func TestDetectAMDGPUsAPURowKeepsItsOwnUsedFigure(t *testing.T) {
+	f := newAMDFakeTree(t)
+	f.addCard("card1", "0000:04:00.0", apuAttrs(nil))
+
+	gpus := detectAMDGPUs(f.drmRoot)
+	if len(gpus) != 1 {
+		t.Fatalf("detectAMDGPUs = %d rows, want 1", len(gpus))
+	}
+	const driverUsed uint64 = 3 << 30
+	const hostUsed uint64 = 25_500_000_000
+	snap := statsSnapshot{
+		MemUsedBytes: hostUsed,
+		GPU:          map[string]gpuStat{gpus[0].statsKey: {VRAMUsed: driverUsed, UtilizationPct: 12}},
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(buildResponse(gpus, nil, 0, snap, "", nil), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	row := raw["GPUs"].([]any)[0].(map[string]any)
+	if got := row["memory_pool"]; got != noderec.GPUMemoryPoolUnified {
+		t.Errorf("memory_pool = %v, want %q", got, noderec.GPUMemoryPoolUnified)
+	}
+	used, present := row["vram_used_bytes"]
+	if !present {
+		t.Fatalf("vram_used_bytes absent: amdgpu measured %d and the row must carry it", driverUsed)
+	}
+	if got := uint64(used.(float64)); got != driverUsed {
+		t.Errorf("vram_used_bytes = %d, want the driver's %d (the host's is %d)", got, driverUsed, hostUsed)
+	}
 }
 
 // TestDetectAMDGPUsDiscreteCapacityIsVRAMOnly pins the other half of the rule.
@@ -254,41 +299,10 @@ func TestAMDModelName(t *testing.T) {
 	}
 }
 
-// TestAMDModelNameNamesTheGenerationAndNeverTheCoreCount is the rule the table
-// exists to enforce. The compute-unit count is NOT derivable from the device
-// id - 0x15e7 alone ships as Vega 6, Vega 7 and Vega 8, separated only by the
-// PCI revision id - so printing one is a guess that is wrong on most SKUs. The
-// generation is derivable, and is what the operator asked to see.
-func TestAMDModelNameNamesTheGenerationAndNeverTheCoreCount(t *testing.T) {
-	architectures := []string{"GCN 5", "GCN 5.1", "RDNA 2", "RDNA 3", "RDNA 3.5"}
-	for id, model := range amdModels {
-		name := amdModelName(id, "")
-		named := false
-		for _, arch := range architectures {
-			if strings.HasSuffix(name, ", "+arch+")") {
-				named = true
-				break
-			}
-		}
-		if !named {
-			t.Errorf("amdModels[%q] = %q; every name must end in a known architecture %v", id, name, architectures)
-		}
-		if !strings.Contains(name, " (") {
-			t.Errorf("amdModels[%q] = %q; want the \"<name> (<codename>, <architecture>)\" shape", id, name)
-		}
-		// "Vega 7" and friends are core counts, not generations. "Vega
-		// Graphics" (no digit) is the marketing name AMD itself uses for the
-		// whole family and is allowed.
-		for _, banned := range []string{"Vega 3", "Vega 6", "Vega 7", "Vega 8", "Vega 10", "Vega 11", " CU", "cores"} {
-			if strings.Contains(name, banned) {
-				t.Errorf("amdModels[%q] = %q contains %q: a compute-unit count cannot be derived from a device id", id, name, banned)
-			}
-		}
-		if !model.apu {
-			t.Errorf("amdModels[%q] is not marked apu; every listed part is an integrated GPU", id)
-		}
-	}
-}
+// The table-wide invariants (every name ends in a known architecture, every
+// name has the "<name> (<codename>, <architecture>)" shape, no name carries a
+// compute-unit count, every listed part is an APU) moved with the table to
+// nvpair-shared/gpunames.
 
 // TestAMDModelNameFallbackDerivesArchitectureFromGCIP covers a part released
 // after amdModels was written. amdgpu publishes the ASIC's own Graphics Core

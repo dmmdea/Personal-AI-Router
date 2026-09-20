@@ -50,6 +50,12 @@ func TestParseIORegistryGPUs(t *testing.T) {
 	if apple.vramTotal != systemMemory || apple.vramUsed != 8<<30 {
 		t.Fatalf("unexpected Apple memory: %+v", apple)
 	}
+	// The capacity is the whole SoC pool, so the row has to say so. Its used
+	// figure stays IOAccelerator's per-device measurement — an Apple GPU is
+	// the shared-pool case that DOES know what it is holding.
+	if !apple.unifiedPool {
+		t.Error("Apple record not marked unifiedPool: its capacity is the host's memory")
+	}
 	if apple.utilizationPct != 100 || !apple.utilizationValid {
 		t.Fatalf("Apple utilization = %d valid:%v, want 100/true",
 			apple.utilizationPct, apple.utilizationValid)
@@ -61,6 +67,9 @@ func TestParseIORegistryGPUs(t *testing.T) {
 	}
 	if discrete.vramTotal != 8<<30 || discrete.vramUsed != 2<<30 {
 		t.Fatalf("unexpected discrete memory: %+v", discrete)
+	}
+	if discrete.unifiedPool {
+		t.Error("a discrete card marked unifiedPool: its VRAM is its own")
 	}
 	if discrete.utilizationPct != 25 || !discrete.utilizationValid {
 		t.Fatalf("discrete utilization = %d valid:%v, want 25/true",

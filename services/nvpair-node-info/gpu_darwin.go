@@ -11,6 +11,8 @@ import (
 	"log"
 	"os/exec"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 const (
@@ -72,11 +74,19 @@ func staticGPUsFromIORegistry(data []byte, systemMemory uint64) ([]GPUInfo, erro
 	}
 	gpus := make([]GPUInfo, 0, len(records))
 	for _, record := range records {
-		gpus = append(gpus, GPUInfo{
+		row := GPUInfo{
 			Name:      record.name,
 			VramBytes: record.vramTotal,
 			statsKey:  record.statsKey,
-		})
+		}
+		if record.unifiedPool {
+			// Apple Silicon: the capacity is the host's whole pool. Mark it so
+			// nothing downstream presents 64 GB of shared memory as this GPU's
+			// own. The used figure still comes from the collector under
+			// statsKey, and it is IOAccelerator's per-device measurement.
+			row.MemoryPool = noderec.GPUMemoryPoolUnified
+		}
+		gpus = append(gpus, row)
 	}
 	return gpus, nil
 }

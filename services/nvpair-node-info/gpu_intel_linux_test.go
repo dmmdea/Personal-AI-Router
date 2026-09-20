@@ -6,10 +6,13 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"nvpair-shared/noderec"
 )
 
 // The Intel inventory is a pure sysfs reader, so every case below runs against
@@ -110,8 +113,8 @@ func igpuAttrs(overrides map[string]string) map[string]string {
 }
 
 // TestDetectIntelGPUsIntegratedRow is the measured case: the iGPU that used to
-// be invisible now produces a row, named, keyed, and marked unified so its
-// capacity and usage come from system RAM the way the Mali rows do.
+// be invisible now produces a row, named, keyed, and marked as a unified pool
+// so its capacity reads as the host's shared memory and not as dedicated VRAM.
 func TestDetectIntelGPUsIntegratedRow(t *testing.T) {
 	f := newIntelFakeTree(t)
 	f.addCard("card1", "0000:00:02.0", "i915", igpuAttrs(nil))
@@ -127,8 +130,18 @@ func TestDetectIntelGPUsIntegratedRow(t *testing.T) {
 	if want := "intel:0000:00:02.0"; got.statsKey != want {
 		t.Errorf("statsKey = %q, want %q", got.statsKey, want)
 	}
-	if !got.usesSystemMemoryUsage {
-		t.Error("usesSystemMemoryUsage not set: an integrated GPU has no dedicated VRAM, its pool is system RAM")
+	if got.MemoryPool != noderec.GPUMemoryPoolUnified {
+		t.Errorf("MemoryPool = %q, want %q: an integrated GPU has no dedicated VRAM, its pool is system RAM",
+			got.MemoryPool, noderec.GPUMemoryPoolUnified)
+	}
+	// The defect this row was changed for. i915 measures nothing about what
+	// the iGPU holds, so the used figure must be absent — not the host's RAM
+	// usage, which is how a Coffee Lake iGPU came to read "25.5 GB / 66 GB".
+	if got.usesSystemMemoryUsage {
+		t.Error("usesSystemMemoryUsage set on an Intel row: /proc/meminfo is the host's number, not the GPU's")
+	}
+	if got.VramUsedBytes != 0 {
+		t.Errorf("VramUsedBytes = %d, want 0/absent: i915 exposes no per-device allocation counter", got.VramUsedBytes)
 	}
 	if got.Kind != "" {
 		t.Errorf("Kind = %q, want empty (an iGPU is a GPU, not an accelerator)", got.Kind)
@@ -141,6 +154,46 @@ func TestDetectIntelGPUsIntegratedRow(t *testing.T) {
 	}
 	if got.TemperatureCelsius != 0 {
 		t.Errorf("TemperatureCelsius = %d, want 0/absent: an iGPU has no sensor of its own", got.TemperatureCelsius)
+	}
+}
+
+// TestDetectIntelGPUsIntegratedRowWireShape is the defect itself, asserted on
+// the bytes a client receives rather than on the struct. The fault was never
+// in this detector: it set a flag, and response assembly copied the HOST's
+// memory usage onto the row, which is how an idle UHD Graphics 630 came to be
+// displayed as "VRAM 25.5 GB / 66 GB".
+//
+// So the snapshot below carries exactly that host figure. If it reappears as
+// this GPU's, the assertion names it.
+func TestDetectIntelGPUsIntegratedRowWireShape(t *testing.T) {
+	f := newIntelFakeTree(t)
+	f.addCard("card1", "0000:00:02.0", "i915", igpuAttrs(nil))
+
+	gpus := detectIntelGPUs(f.drmRoot)
+	if len(gpus) != 1 {
+		t.Fatalf("detectIntelGPUs = %d rows, want 1", len(gpus))
+	}
+	const hostUsed uint64 = 25_500_000_000
+	body := buildResponse(gpus, nil, 0, statsSnapshot{MemUsedBytes: hostUsed}, "", nil)
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	row := raw["GPUs"].([]any)[0].(map[string]any)
+
+	if got := row["memory_pool"]; got != noderec.GPUMemoryPoolUnified {
+		t.Errorf("memory_pool = %v, want %q", got, noderec.GPUMemoryPoolUnified)
+	}
+	if used, present := row["vram_used_bytes"]; present {
+		t.Errorf("vram_used_bytes = %v, want the key absent (the host's figure is %d)", used, hostUsed)
+	}
+	// The ceiling stays: a client still needs to know how much memory the
+	// device can reach, it just must not be told how much of it is spent.
+	if _, present := row["vram_bytes"]; !present {
+		t.Error("vram_bytes absent: the shared-pool ceiling is the one memory number this row does know")
+	}
+	if t.Failed() {
+		t.Logf("response body: %s", body)
 	}
 }
 
@@ -265,28 +318,8 @@ func TestIntelModelName(t *testing.T) {
 	}
 }
 
-// TestIntelModelNameNamesTheGeneration mirrors the AMD rule: a node list has
-// to say which graphics generation the part is, because that is what decides
-// what it can run. A bare marketing name does not.
-func TestIntelModelNameNamesTheGeneration(t *testing.T) {
-	architectures := []string{"Gen 9.5", "Xe-LP", "Xe-HPG", "Xe-LPG", "Xe2", "Xe2-HPG"}
-	for id := range intelModels {
-		name := intelModelName(id)
-		named := false
-		for _, arch := range architectures {
-			if strings.HasSuffix(name, ", "+arch+")") {
-				named = true
-				break
-			}
-		}
-		if !named {
-			t.Errorf("intelModels[%q] = %q; every name must end in a known architecture %v", id, name, architectures)
-		}
-		if !strings.HasPrefix(name, "Intel ") {
-			t.Errorf("intelModels[%q] = %q; want a vendor-prefixed name", id, name)
-		}
-	}
-}
+// The table-wide invariants (every name ends in a known architecture, every
+// name is vendor-prefixed) moved with the table to nvpair-shared/gpunames.
 
 // TestDetectIntelGPUsUnlistedIDKeepsTheRow: a part released after intelModels
 // was written is still published, under a name that carries its device id, so
@@ -304,7 +337,7 @@ func TestDetectIntelGPUsUnlistedIDKeepsTheRow(t *testing.T) {
 	if got, want := gpus[0].Name, "Intel Graphics (device 0xffff)"; got != want {
 		t.Errorf("Name = %q, want %q", got, want)
 	}
-	if !gpus[0].usesSystemMemoryUsage {
+	if gpus[0].MemoryPool != noderec.GPUMemoryPoolUnified {
 		t.Error("an unlisted card with no mem_info_vram_total must be judged integrated by its own numbers")
 	}
 }
@@ -325,6 +358,9 @@ func TestDetectIntelGPUsDiscreteReadsVRAM(t *testing.T) {
 	}
 	if got, want := gpus[0].VramBytes, uint64(12884901888); got != want {
 		t.Errorf("VramBytes = %d, want %d", got, want)
+	}
+	if gpus[0].MemoryPool != "" {
+		t.Errorf("MemoryPool = %q on a discrete card: its VRAM is its own, not a shared pool", gpus[0].MemoryPool)
 	}
 	if gpus[0].usesSystemMemoryUsage {
 		t.Error("usesSystemMemoryUsage set on a discrete card: its VRAM is not system RAM")
@@ -347,8 +383,8 @@ func TestDetectIntelGPUsDiscreteWithoutVRAMAttributeLeavesCapacityUnknown(t *tes
 	if gpus[0].VramBytes != 0 {
 		t.Errorf("VramBytes = %d, want 0 (unknown)", gpus[0].VramBytes)
 	}
-	if gpus[0].usesSystemMemoryUsage {
-		t.Error("a listed discrete card must not be reported as unified memory")
+	if gpus[0].MemoryPool != "" {
+		t.Errorf("MemoryPool = %q: a listed discrete card must not be reported as a shared pool", gpus[0].MemoryPool)
 	}
 }
 
