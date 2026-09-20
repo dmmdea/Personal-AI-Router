@@ -13,7 +13,9 @@ export type GpuInfo = {
     usageColor: string
     vramColor: string
     temperature: number // degrees Celsius, 0 = no reading
-    kind?: string // "npu" for an accelerator row (no VRAM)
+    // "npu" for an accelerator row (no VRAM) or "board" for the motherboard
+    // controller (no VRAM and no usage); absent for a GPU.
+    kind?: string
 }
 
 export type CpuFallbackInfo = {

@@ -434,11 +434,12 @@ type GPUInfo struct {
 	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
 	// Kind distinguishes a display/compute GPU (empty, the historical default)
-	// from a dedicated inference accelerator such as an Edge TPU or an NPU
-	// (GPUKindAccelerator). Accelerators are listed in the same inventory so
-	// every client shows them, but they cannot run the engines PAIR schedules,
-	// so their utilization never feeds a node's GPU pressure — see
-	// MaxGPUUtilization.
+	// from every other device listed in the same inventory: a dedicated
+	// inference accelerator such as an Edge TPU or an NPU
+	// (GPUKindAccelerator), or the host's motherboard controller
+	// (GPUKindBoard). They are listed here so every client shows them, but
+	// none of them can run the engines PAIR schedules, so their utilization
+	// never feeds a node's GPU pressure — see MaxGPUUtilization.
 	Kind string `json:"kind,omitempty"`
 	// TemperatureCelsius is the device's own thermal readout when the driver
 	// exposes one (accelerators do; GPUs leave it zero and it drops from JSON).
@@ -449,15 +450,27 @@ type GPUInfo struct {
 // accelerator rather than a GPU: an Edge TPU, an NPU, an M.2 AI module.
 const GPUKindAccelerator = "npu"
 
+// GPUKindBoard marks a GPUInfo row that describes the host's motherboard
+// controller — ASUS's TPU + EPU pair, and the equivalents other vendors fit —
+// listed here so a client shows the board beside the devices it feeds. The
+// row carries a temperature and nothing else: those controllers publish no
+// load or status interface on Windows, and a fabricated utilization would
+// read exactly like a real one.
+const GPUKindBoard = "board"
+
 // MaxGPUUtilization is the node-level GPU busy figure the scheduler's pressure
-// model consumes: the highest utilization across the node's GPUs. Accelerator
-// rows are excluded — a saturated Edge TPU says nothing about whether the
-// node's GPU can take another LLM job, and folding it in would push the node
-// into a higher pressure band for work it could serve.
+// model consumes: the highest utilization across the node's GPUs.
+//
+// Only rows with an empty Kind count, which is every display/compute GPU and
+// nothing else. A saturated Edge TPU says nothing about whether the node's GPU
+// can take another LLM job, and folding it in would push the node into a
+// higher pressure band for work it could serve; the same is true of every
+// future Kind, so the rule is stated as "GPUs only" rather than as a list of
+// the kinds known when it was written.
 func MaxGPUUtilization(gpus []GPUInfo) uint32 {
 	var utilization uint32
 	for i := range gpus {
-		if gpus[i].Kind == GPUKindAccelerator {
+		if gpus[i].Kind != "" {
 			continue
 		}
 		if gpus[i].UtilizationPercent > utilization {

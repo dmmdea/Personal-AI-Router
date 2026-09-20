@@ -9,6 +9,7 @@ import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
+import { showsUsage, showsVram } from '@/ui/utils/hardware-rows'
 
 export default function NodePerformance({
     node,
@@ -187,48 +188,53 @@ export default function NodePerformance({
                                 </Text>
 
                                 <Stack gap="1">
-                                    {/* GPU Utilization */}
-                                    <Flex
-                                        align="center"
-                                        gap="2"
-                                        className="cursor-pointer"
-                                        onClick={() => handleLegendClick(`gpu-${gpu.id}`)}
-                                    >
-                                        <div
-                                            className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                                            style={{
-                                                backgroundColor: `${gpu.color}BF`,
-                                                border: `2px solid ${gpu.color}`,
-                                                marginTop: '1px',
-                                                opacity:
-                                                    selectedMetric === undefined ||
-                                                    selectedMetric === `gpu-${gpu.id}`
-                                                        ? 1
-                                                        : 0.3
-                                            }}
-                                        />
-
+                                    {/* GPU Utilization — the motherboard controller reports
+                                        no busy figure at all, so it gets no Usage line rather
+                                        than a "0%" that would read as idle. */}
+                                    {showsUsage(gpu) && (
                                         <Flex
                                             align="center"
                                             gap="2"
-                                            className="transition-opacity"
-                                            style={{
-                                                opacity:
-                                                    selectedMetric === undefined ||
-                                                    selectedMetric === `gpu-${gpu.id}`
-                                                        ? 1
-                                                        : 0.5
-                                            }}
+                                            className="cursor-pointer"
+                                            onClick={() => handleLegendClick(`gpu-${gpu.id}`)}
                                         >
-                                            <Text kind="body/regular/sm">Usage</Text>
-                                            <Text kind="body/regular/sm">
-                                                {Math.floor(gpu.utilization)}%
-                                            </Text>
-                                        </Flex>
-                                    </Flex>
+                                            <div
+                                                className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                                                style={{
+                                                    backgroundColor: `${gpu.color}BF`,
+                                                    border: `2px solid ${gpu.color}`,
+                                                    marginTop: '1px',
+                                                    opacity:
+                                                        selectedMetric === undefined ||
+                                                        selectedMetric === `gpu-${gpu.id}`
+                                                            ? 1
+                                                            : 0.3
+                                                }}
+                                            />
 
-                                    {/* GPU VRAM — skipped for an accelerator row (no VRAM figure) */}
-                                    {!(gpu.kind === 'npu' && gpu.vramTotal === 0) && (
+                                            <Flex
+                                                align="center"
+                                                gap="2"
+                                                className="transition-opacity"
+                                                style={{
+                                                    opacity:
+                                                        selectedMetric === undefined ||
+                                                        selectedMetric === `gpu-${gpu.id}`
+                                                            ? 1
+                                                            : 0.5
+                                                }}
+                                            >
+                                                <Text kind="body/regular/sm">Usage</Text>
+                                                <Text kind="body/regular/sm">
+                                                    {Math.floor(gpu.utilization)}%
+                                                </Text>
+                                            </Flex>
+                                        </Flex>
+                                    )}
+
+                                    {/* GPU VRAM — skipped for an accelerator row and for the
+                                        motherboard controller (no VRAM figure) */}
+                                    {showsVram(gpu) && (
                                         <Flex
                                             align="center"
                                             gap="2"
