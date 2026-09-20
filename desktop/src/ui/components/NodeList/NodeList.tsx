@@ -37,7 +37,7 @@ function NodeList() {
     }
 
     return (
-        <Stack className="grow min-w-0 h-full max-w-300">
+        <Stack className="grow min-w-0 h-full">
             <OverlayScrollbarsComponent
                 className="node-list-scroll-container"
                 style={{
@@ -47,7 +47,7 @@ function NodeList() {
                 options={SCROLLBAR_OPTIONS}
                 defer
             >
-                <Stack className="min-w-0 min-h-full dir-ltr" gap="3" data-node-list-content>
+                <div className="node-grid min-w-0 min-h-full dir-ltr gap-3" data-node-list-content>
                     {online.map(node => (
                         <NodeCardDetails key={node.id} node={node} />
                     ))}
@@ -62,7 +62,7 @@ function NodeList() {
                                 ipAddress={node.ipAddress}
                             />
                         ))}
-                </Stack>
+                </div>
             </OverlayScrollbarsComponent>
         </Stack>
     )
