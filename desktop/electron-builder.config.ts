@@ -84,7 +84,7 @@ function assertCliBinPackagingInputs(): void {
     const platform = packagingPlatform()
 
     const expected = new Set([
-        ...modularShippedBinaryBaseNames().map(baseName =>
+        ...modularShippedBinaryBaseNames(platform).map(baseName =>
             modularBinaryFileName(baseName, platform)
         ),
         'manifest.json'

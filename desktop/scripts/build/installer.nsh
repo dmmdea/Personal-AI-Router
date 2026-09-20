@@ -29,6 +29,11 @@
   nsExec::ExecToLog 'taskkill /F /T /IM "nvpair-job-scheduler.exe"'
   nsExec::ExecToLog 'taskkill /F /T /IM "nvpair-errors.exe"'
   nsExec::ExecToLog 'taskkill /F /T /IM "nvpair-ui-broker.exe"'
+  ; nvpair-sensors is a Windows service (LocalSystem), not a broker worker, so
+  ; taskkill is the wrong tool: its own --uninstall stops and deregisters it,
+  ; freeing the binary to be replaced or deleted. A missing executable (first
+  ; install, or an older version without it) only logs a failure.
+  nsExec::ExecToLog '"$INSTDIR\resources\cli-bin\nvpair-sensors.exe" --uninstall'
   Sleep 500
 !macroend
 
@@ -263,9 +268,21 @@
   ${endif}
 !macroend
 
+; Register the host-sensor helper as a Windows service (automatic start,
+; LocalSystem, restart on failure). It reads the CPU package temperature
+; through the PawnIO driver, which admits administrators only, and serves it to
+; nvpair-node-info over a local named pipe — no listener, so no firewall rule.
+; Without PawnIO on the machine it runs and reports that it has no sensor, and
+; the panel simply shows no CPU temperature.
+!macro pairInstallSensorsService
+  DetailPrint "Registering the Personal AI Router host-sensor service..."
+  nsExec::ExecToLog '"$INSTDIR\resources\cli-bin\nvpair-sensors.exe" --install'
+!macroend
+
 !macro customInstall
   !insertmacro pairAssertPayloadInstalled
   !insertmacro pairAddFirewallRules
+  !insertmacro pairInstallSensorsService
 !macroend
 
 ; Detect a genuine silent run on the ORIGINAL command line. A one-click

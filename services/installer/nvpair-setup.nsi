@@ -120,6 +120,10 @@ FunctionEnd
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-job-scheduler.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-ui-broker.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-tui.exe"'
+  ; nvpair-sensors is a Windows service, not a broker worker: stop and
+  ; deregister it through its own --uninstall so the binary is free to
+  ; replace or delete. Harmless when no previous install left one behind.
+  nsExec::ExecToLog '"$INSTDIR\bin\nvpair-sensors.exe" --uninstall'
   ; Give Windows a moment to release the handles.
   Sleep 500
 !macroend
@@ -189,6 +193,11 @@ Section "Install"
   ; over stdio for headless / SSH operation. It has no listening port, so
   ; it needs no firewall rule.
   File "..\build\bin\nvpair-tui.exe"
+  ; nvpair-sensors is the elevated host-sensor helper (CPU package temperature
+  ; through the PawnIO driver). It runs as a LocalSystem service because the
+  ; driver admits administrators only, and serves nvpair-node-info over a local
+  ; named pipe, so it needs no firewall rule. Registered below, after the files.
+  File "..\build\bin\nvpair-sensors.exe"
 
   ; Write uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -261,6 +270,11 @@ Section "Install"
   ; to paired peers over mutually-authenticated TLS on TCP :14323. It only binds
   ; when this node is clustered, but the rule is added unconditionally like the rest.
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Engine Manager Control (TCP 14323)" dir=in action=allow protocol=TCP localport=14323 program="$INSTDIR\bin\nvpair-engine-manager.exe" enable=yes profile=any remoteip=localsubnet'
+
+  ; Register and start the host-sensor helper service (automatic start,
+  ; LocalSystem, restart on failure). Without PawnIO installed it runs and
+  ; reports that it has no sensor; node-info then omits the CPU temperature.
+  nsExec::ExecToLog '"$INSTDIR\bin\nvpair-sensors.exe" --install'
 SectionEnd
 
 ;---------------------------------------
@@ -301,6 +315,7 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\nvpair-job-scheduler.exe"
   Delete "$INSTDIR\bin\nvpair-ui-broker.exe"
   Delete "$INSTDIR\bin\nvpair-tui.exe"
+  Delete "$INSTDIR\bin\nvpair-sensors.exe"
   RMDir  "$INSTDIR\bin"
   Delete "$INSTDIR\EULA.txt"
   Delete "$INSTDIR\uninstall.exe"

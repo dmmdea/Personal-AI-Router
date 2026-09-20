@@ -41,7 +41,7 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import {
-    MODULAR_BUNDLED_BINARIES,
+    modularBundledBinariesFor,
     MODULAR_RUNTIME_BINARIES,
     modularBinaryFileName,
     modularShippedBinaryBaseNames
@@ -277,7 +277,7 @@ function parseManifest(text: string): BuildManifest | null {
 }
 
 function expectedFileNames(platform: SupportedPlatform): string[] {
-    return modularShippedBinaryBaseNames().map(baseName =>
+    return modularShippedBinaryBaseNames(platform).map(baseName =>
         modularBinaryFileName(baseName, platform)
     )
 }
@@ -405,7 +405,7 @@ function main(): void {
 
     clearCliBin()
     mkdirSync(CLI_BIN_DIR, { recursive: true })
-    const shipped = modularShippedBinaryBaseNames()
+    const shipped = modularShippedBinaryBaseNames(options.platform)
     console.log(
         `[modular-build] building ${shipped.length} binaries for ${options.platform}/${options.arch} (fingerprint ${sourceFingerprint.slice(0, 12)})`
     )
@@ -415,7 +415,7 @@ function main(): void {
         const version = versions.components[binary.baseName] ?? '0.0.0'
         files.push(buildBinary(repo, options, binary.baseName, version))
     }
-    for (const binary of MODULAR_BUNDLED_BINARIES) {
+    for (const binary of modularBundledBinariesFor(options.platform)) {
         const version = versions.components[binary.baseName] ?? '0.0.0'
         files.push(buildBinary(repo, options, binary.baseName, version))
     }

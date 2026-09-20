@@ -22,6 +22,7 @@ import {
     readCliBinManifest
 } from '@/electron/service-bridge/modular-supervisor'
 import { modularShippedBinaryBaseNames } from '@/shared/constants/modular-binaries'
+import { currentPlatform } from '@/shared/utils/platform'
 
 const LICENSE_FILE = 'LICENSE'
 const THIRD_PARTY_LICENSE_FILE = 'THIRD_PARTY_NOTICES.md'
@@ -68,7 +69,7 @@ export function registerServiceIpc(): void {
 
     safeHandle('service:get-versions', async (): Promise<ServiceVersions> => {
         const manifest = readCliBinManifest()
-        const binaries = modularShippedBinaryBaseNames()
+        const binaries = modularShippedBinaryBaseNames(currentPlatform())
             .map(name => ({
                 name,
                 version: manifest.components[name] ?? ''

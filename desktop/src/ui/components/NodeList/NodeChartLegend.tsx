@@ -87,15 +87,18 @@ function NodeChartLegend({
                             </Text>
                         </Flex>
                     )}
-                    <Flex align="center" gap="2">
-                        <ColorDot color={gpu.usageColor} />
-                        <Text kind="body/regular/sm" className="text-subtle-color">
-                            Temp
-                        </Text>
-                        <Text kind="body/semibold/sm">
-                            {gpu.temperature > 0 ? `${gpu.temperature} °C` : '--'}
-                        </Text>
-                    </Flex>
+                    {/* A device without a thermal readout (an integrated GPU, a
+                        host without nvidia-smi) gets no Temp row rather than a
+                        placeholder, matching the CPU line. */}
+                    {gpu.temperature > 0 && (
+                        <Flex align="center" gap="2">
+                            <ColorDot color={gpu.usageColor} />
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                Temp
+                            </Text>
+                            <Text kind="body/semibold/sm">{gpu.temperature} °C</Text>
+                        </Flex>
+                    )}
                 </Stack>
             ))}
         </Stack>

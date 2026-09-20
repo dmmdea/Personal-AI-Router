@@ -203,6 +203,10 @@
 | `settings/set-cluster-id` | request (we call) | ✅ yes |
 | `settings/set-force-ports` | request (we call) | ⚠️ not called |
 
+## nvpair-sensors
+
+_No JSON-RPC methods detected (HTTP-only binary, or source not present)._
+
 ## nvpair-tui
 
 | Method | Direction | In bridge? |

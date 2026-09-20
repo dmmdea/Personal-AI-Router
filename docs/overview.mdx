@@ -163,7 +163,7 @@ It stages the generated binaries in `desktop/cli-bin/`.
 
 ### `services/`
 
-The Go tree contains 13 build outputs:
+The Go tree contains 14 build outputs:
 
 - `nvpair-ui-broker`: service entry point, worker supervisor, and JSON-RPC API
 - `ollama-proxy` and `lmstudio-proxy`: compatible inference proxies
@@ -176,6 +176,7 @@ The Go tree contains 13 build outputs:
 - `nvpair-errors`: service error registry and peer synchronization
 - `nvpair-job-scheduler`: node-wide pending-work priority snapshots
 - `nvpair-tui`: standalone terminal interface for headless systems
+- `nvpair-sensors`: Windows-only elevated host-sensor service (CPU package temperature for `nvpair-node-info`)
 
 The broker supervises the worker processes. `nvpair-tui` is different. It is a
 client that starts its own broker, which then starts the workers.
