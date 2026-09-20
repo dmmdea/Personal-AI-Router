@@ -31,6 +31,10 @@ import (
 // % Processor Time, so surfacing it separately would only invite
 // confusion about which number matches the utilization %.
 //
+// Where ghw is wrong or empty (SoC boards: no model name, and a core
+// count covering one cluster only) cpuInfoOrFallback repairs both from
+// the device tree and /proc/cpuinfo — see cpu_detect_linux.go.
+//
 // Model name is pulled from the first processor. On asymmetric / big-
 // LITTLE configurations ghw returns multiple Processor entries with
 // distinct Model strings; we pick the first consistently. A future
@@ -50,8 +54,5 @@ func detectCPU() *CPUInfo {
 	if name == "" {
 		name = strings.TrimSpace(info.Processors[0].Vendor)
 	}
-	return &CPUInfo{
-		Name:  name,
-		Cores: info.TotalCores,
-	}
+	return cpuInfoOrFallback(name, info.TotalCores)
 }
