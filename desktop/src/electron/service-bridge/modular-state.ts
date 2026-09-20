@@ -205,6 +205,11 @@ interface ModularGpu {
     utilizationPercent: number
     // Whole degrees Celsius; 0 when the node reports none.
     temperatureCelsius: number
+    // Whole watts the device is drawing; 0 when nothing meters it. Most of a
+    // node's inventory has no meter at all (an integrated GPU, a Mali GPU, an
+    // RKNPU, an Edge TPU, the board row), so 0 here means "unmeasured" and
+    // the UI must show no figure rather than "0 W".
+    powerWatts: number
     // "" for a GPU, "npu" for an accelerator row (Edge TPU / NPU), "board"
     // for the host's motherboard controller. Carried through untouched: the
     // kinds are node-info's to define, and a row this build has not heard of
@@ -221,6 +226,10 @@ interface ModularCpu {
     cores: number
     utilizationPercent: number
     temperatureCelsius: number
+    // Whole watts the package is drawing; 0 when the host exposes no readable
+    // energy counter, which is every Linux host where the powercap file is
+    // root-only and this service runs unprivileged.
+    powerWatts: number
 }
 
 interface ModularMemory {
@@ -526,6 +535,7 @@ function gpuArrayValue(value: JsonValue | undefined): ModularGpu[] {
             vramUsedBytes: numberValue(obj.vram_used_bytes),
             utilizationPercent: numberValue(obj.utilization_percent),
             temperatureCelsius: numberValue(obj.temperature_celsius),
+            powerWatts: numberValue(obj.power_watts),
             kind: stringValue(obj.kind),
             memoryPool: stringValue(obj.memory_pool)
         })
@@ -540,7 +550,8 @@ function cpuValue(value: JsonValue | undefined): ModularCpu | null {
         name: stringValue(obj.name),
         cores: numberValue(obj.cores),
         utilizationPercent: numberValue(obj.utilization_percent),
-        temperatureCelsius: numberValue(obj.temperature_celsius)
+        temperatureCelsius: numberValue(obj.temperature_celsius),
+        powerWatts: numberValue(obj.power_watts)
     }
 }
 
@@ -584,6 +595,7 @@ function sameGpu(left: ModularGpu, right: ModularGpu): boolean {
         left.vramUsedBytes === right.vramUsedBytes &&
         left.utilizationPercent === right.utilizationPercent &&
         left.temperatureCelsius === right.temperatureCelsius &&
+        left.powerWatts === right.powerWatts &&
         left.kind === right.kind &&
         left.memoryPool === right.memoryPool
     )
@@ -603,7 +615,8 @@ function sameCpu(left: ModularCpu | null, right: ModularCpu | null): boolean {
         left.name === right.name &&
         left.cores === right.cores &&
         left.utilizationPercent === right.utilizationPercent &&
-        left.temperatureCelsius === right.temperatureCelsius
+        left.temperatureCelsius === right.temperatureCelsius &&
+        left.powerWatts === right.powerWatts
     )
 }
 
@@ -734,7 +747,15 @@ function toMetrics(node: ModularNode): NodeItemMetrics {
             id: `${node.id}:gpu:${index}`,
             value: gpu.temperatureCelsius
         })),
-        cpuTemperature: node.cpu?.temperatureCelsius ?? 0
+        // Power is a reading, not a chart series, and it travels for every
+        // row: a 0 here means the device has no meter, which the UI renders
+        // as no figure at all rather than as "0 W".
+        gpuPower: node.gpus.map((gpu, index) => ({
+            id: `${node.id}:gpu:${index}`,
+            value: gpu.powerWatts
+        })),
+        cpuTemperature: node.cpu?.temperatureCelsius ?? 0,
+        cpuPower: node.cpu?.powerWatts ?? 0
     }
     return { id: node.id, current, historical: [current] }
 }

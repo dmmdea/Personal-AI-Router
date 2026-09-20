@@ -32,7 +32,8 @@ const PipeName = `\\.\pipe\nvpair-sensors`
 //
 // It counts BREAKING changes only: a field that disappears, changes type, or
 // changes meaning. Adding a new optional section — as the board sensors did —
-// leaves it at its current value on purpose. The helper and its readers are
+// or a new optional field inside an existing one — as the CPU package wattage
+// did — leaves it at its current value on purpose. The helper and its readers are
 // deployed separately (the helper is an elevated service, the reader runs
 // under the desktop app), so a helper that bumped Schema for an additive
 // section would make every already-installed reader refuse the whole report
@@ -63,10 +64,22 @@ type Report struct {
 	Error string        `json:"error,omitempty"`
 }
 
-// CPUReading is the CPU package temperature and where it came from.
+// CPUReading is the CPU package temperature, the package power draw when the
+// processor's energy counter is readable, and where they came from.
 type CPUReading struct {
 	// PackageCelsius is the package temperature in whole degrees.
 	PackageCelsius uint32 `json:"package_celsius"`
+	// PackageWatts is the average package power in whole watts over the
+	// interval between the last two samples, derived from the processor's
+	// energy counter (MSR_PKG_ENERGY_STATUS, scaled by MSR_RAPL_POWER_UNIT).
+	//
+	// Zero — and so absent — until the helper has two samples to subtract,
+	// and permanently so on a CPU whose energy unit it could not resolve. It
+	// is a separate field rather than part of the temperature because the two
+	// fail apart: the energy MSRs can be missing on a part whose thermal
+	// registers read perfectly, and losing the temperature over that would
+	// trade a reading every consumer depends on for one that is new.
+	PackageWatts float64 `json:"package_watts,omitempty"`
 	// TjMaxCelsius is the junction maximum the readout is relative to
 	// (IA32_TEMPERATURE_TARGET on Intel), for readers that want the margin.
 	TjMaxCelsius uint32 `json:"tjmax_celsius,omitempty"`
@@ -112,6 +125,24 @@ func (r Report) CPUPackage(now time.Time, maxAge time.Duration) (celsius uint32,
 		return 0, false
 	}
 	return r.CPU.PackageCelsius, true
+}
+
+// CPUPackageWatts returns the package power draw when the report carries one
+// that is non-zero and no older than maxAge as of now.
+//
+// It applies the same freshness rule as CPUPackage but is asked separately,
+// because the two readings are independently available: a helper on a CPU
+// whose energy unit it could not resolve publishes a temperature and no
+// wattage, and the reverse can happen for one tick after a start, while the
+// power derivative still has only one sample.
+func (r Report) CPUPackageWatts(now time.Time, maxAge time.Duration) (watts float64, ok bool) {
+	if r.CPU == nil || r.CPU.PackageWatts <= 0 {
+		return 0, false
+	}
+	if r.CPU.SampledAt.IsZero() || now.Sub(r.CPU.SampledAt) > maxAge || r.CPU.SampledAt.After(now.Add(maxAge)) {
+		return 0, false
+	}
+	return r.CPU.PackageWatts, true
 }
 
 // BoardReading is one snapshot of the motherboard sensors, read from the

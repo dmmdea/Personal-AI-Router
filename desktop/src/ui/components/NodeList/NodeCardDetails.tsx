@@ -98,6 +98,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     usageColor: getGpuColor(index),
                     vramColor: getVramColor(index),
                     temperature: nodeMetrics?.gpuTemperature.find(t => t.id === gpu.id)?.value ?? 0,
+                    power: nodeMetrics?.gpuPower.find(p => p.id === gpu.id)?.value ?? 0,
                     kind: gpu.kind,
                     memoryPool: gpu.memoryPool
                 }
@@ -115,6 +116,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
             usage: Math.round(cpuUsage),
             usageColor: CHART_COLORS.CPU,
             temperature: nodeMetrics?.cpuTemperature ?? 0,
+            power: nodeMetrics?.cpuPower ?? 0,
             memoryUsage: memUsage,
             memoryUsageFormatted: formatBytes((ramTotal * memUsage) / 100, 1),
             memoryTotalFormatted: formatBytes(ramTotal, 1),

@@ -57,7 +57,8 @@ Returns the merged static identity (collected once at startup) and the latest dy
       "vram_bytes": 10737418240,
       "vram_used_bytes": 2147483648,
       "utilization_percent": 42,
-      "temperature_celsius": 61
+      "temperature_celsius": 61,
+      "power_watts": 210
     },
     {
       "name": "Google Coral Edge TPU",
@@ -82,7 +83,8 @@ Returns the merged static identity (collected once at startup) and the latest dy
     "name": "AMD Ryzen 9 5900X 12-Core Processor",
     "cores": 12,
     "utilization_percent": 7,
-    "temperature_celsius": 58
+    "temperature_celsius": 58,
+    "power_watts": 79
   },
   "memory": {
     "total_bytes": 34359738368,
@@ -103,6 +105,7 @@ Field notes:
 - `kind` is absent for a GPU, `"npu"` for a dedicated inference accelerator (an Edge TPU / NPU), and `"board"` for the host's motherboard controller. All of them are listed in the same `GPUs` inventory so every client shows them, and none of them can run the engines PAIR schedules — so consumers derive a node's GPU pressure with `noderec.MaxGPUUtilization`, which counts **only** rows with an empty `kind`, and no such row contributes to `telemetryValid` / `msSince`. The rule is "GPUs only" rather than a list of the kinds that existed when it was written, so a kind added later is skipped without anyone having to remember.
 - A `kind:"board"` row carries a name and a `temperature_celsius`, and nothing else. See **Windows motherboard controller** below for why there is no `utilization_percent` on it and why that is not an omission to fix.
 - `temperature_celsius` is a device's thermal readout in whole degrees: on a GPU row from `nvidia-smi` (`temperature.gpu`, Linux and Windows; joined to the adapter by PCI address on Windows), on an accelerator row from its driver, and on `cpu` the package temperature from Linux hwmon (`coretemp` "Package id 0" / `k10temp` Tctl, else the `x86_pkg_temp` thermal zone). On Windows the package sensor is a ring-0 register, so the reading comes from the elevated `nvpair-sensors` service over `\\.\pipe\nvpair-sensors` (see `../nvpair-sensors/README.md`); a host without that service, without PawnIO, or with a stale report omits it. Every temperature field is omitted wherever it cannot be read.
+- `power_watts` is what a device is drawing in whole watts, published only where the hardware meters itself: an NVIDIA GPU (`nvidia-smi`'s `power.draw`, Linux and Windows), an AMD GPU or APU (the amdgpu hwmon's `PPT` input), and on `cpu` the package power derived from the processor's energy counter. Every other row has no meter and carries no such field — see **Power draw** below for the full table and for why a Linux host normally reports no `cpu.power_watts`.
 - All dynamic fields and the `cpu` / `memory` objects use `omitempty`: a value the service couldn't read is dropped from the JSON entirely rather than reported as a misleading literal zero. A genuinely idle CPU renders the same as "unknown" — that ambiguity is intentional and benign.
 - `vram_bytes` is reported through DXGI on Windows, `nvidia-smi` on Linux, and IORegistry on macOS. On a unified-memory NVIDIA GPU such as DGX Spark, Linux uses total physical system memory for `vram_bytes` and the independently sampled system-memory usage for `vram_used_bytes`. On Apple Silicon, `vram_bytes` is total physical unified memory and `vram_used_bytes` is the GPU driver's mapped allocation (`Alloc system memory`), not whole-system RAM usage or the momentarily active subset.
 - `memory_pool` is absent on a device with memory of its own and `"unified"` on one whose `vram_bytes` is a pool it shares with the host. A client must not label a unified capacity "VRAM", and must not assume such a row reports usage — see **Unified memory rows** below.
@@ -110,6 +113,32 @@ Field notes:
 ## Unified memory rows
 
 Several devices in this inventory have no memory of their own: an Intel or AMD integrated GPU, an Arm Mali GPU, an RKNPU, an Apple Silicon GPU and an NVIDIA UMA part such as DGX Spark all allocate out of a pool they share with the CPU. Those rows carry `memory_pool:"unified"`, which says one thing only — the `vram_bytes` ceiling is shared with the host and must not be presented as dedicated VRAM. It deliberately says nothing about usage, because whether a unified row can also report `vram_used_bytes` depends on whether anything measures what *that device* is holding. An AMD APU, an Apple Silicon GPU and an NVIDIA UMA part can (amdgpu's `mem_info_vram_used + mem_info_gtt_used`; IOAccelerator's `Alloc system memory`; and, on a part with one physical pool and one allocator — which is why `nvidia-smi` answers `[N/A]` for `memory.total` there — the `/proc/meminfo` figure itself), so those rows publish one. An Intel iGPU, a Mali GPU and an RKNPU cannot: no unprivileged driver counter exists, so `vram_used_bytes` is omitted entirely and a client shows the shared ceiling alone. The host's own RAM usage is never substituted for a missing per-device figure. It used to be, on every unified row, and it produced exactly the claim it looked like: an idle Intel UHD Graphics 630 displayed as using 25.5 GB of 66 GB, and an idle Mali-G610 as using 1.1 GB of 8 GB — in both cases the whole box's memory usage wearing the GPU's label.
+
+## Power draw
+
+`power_watts` is what a device is drawing right now, in whole watts, and it appears **only on rows whose hardware meters itself**. Most of this inventory has no meter at all, and the field is simply absent there — never a literal `0`, which a client would render as "this device is drawing no power".
+
+| row / host | source | reported |
+| --- | --- | --- |
+| NVIDIA GPU, Linux | `nvidia-smi --query-gpu=power.draw`, on the same 1 s dynamic query as utilization and temperature | yes |
+| NVIDIA GPU, Windows | the same query on the 5 s `nvidia-smi` poller, joined to the DXGI adapter by PCI address — the same join the temperature uses | yes |
+| AMD GPU / APU, Linux | the amdgpu hwmon's `power1_input` (microwatts), the input labelled `PPT` | yes |
+| CPU, Windows | `MSR_PKG_ENERGY_STATUS` (0x611) scaled by `MSR_RAPL_POWER_UNIT` (0x606), read by the elevated `nvpair-sensors` helper through PawnIO and delivered as `cpu.package_watts` over its named pipe | yes, when the helper is installed and running |
+| CPU, Linux | `/sys/class/powercap/intel-rapl:<N>/energy_uj` (the same class the `amd_rapl` driver registers under on Zen) | **no in practice** — see below |
+| CPU, macOS | no driverless source | no |
+| Intel integrated GPU | i915/xe expose no power attribute to an unprivileged reader | no |
+| Arm Mali GPU, RKNPU | no meter in the driver | no |
+| Google Coral Edge TPU | the gasket/apex driver keeps no power attribute | no |
+| Hailo-8L | HailoRT's `measure-power` is unsupported on that module | no |
+| `kind:"board"` row | the Super I/O chip meters no rail; see **Windows motherboard controller** | no |
+| Apple Silicon GPU | IOAccelerator publishes no power figure | no |
+
+**Every power figure is a derivative where the source is a counter.** `energy_uj` and `MSR_PKG_ENERGY_STATUS` are running totals that roll over, so watts are Δenergy / Δt between two ticks. The first tick after a start produces no figure at all, and a delta that can only be a counter re-base (a driver reload, a resume from sleep) is discarded and the baseline dropped, rather than published as the five-digit number the arithmetic would otherwise give. `nvidia-smi` and the amdgpu hwmon report instantaneous power directly and need none of that.
+
+**The Linux CPU ceiling.** Since Linux 5.10 `energy_uj` is mode `0400`, owned by root: the kernel restricted it because the counter is a side channel — power traces recovered AES keys and broke KASLR (CVE-2020-8694) — and no unprivileged interface replaced it. This service runs as the desktop user, so on an ordinary host the read fails with `EACCES`, one `INFO` line at startup names the file and the reason, and `cpu.power_watts` is omitted for the life of the process. Measured on both a Intel + NVIDIA host and an AMD Zen host: the zone is present and reads `package-0`, `max_energy_range_uj` is world-readable, and `energy_uj` is `-r--------`.
+
+This is a documented limit, not a gap to route around. Making it readable would take a setuid helper, a second elevated service, or a boot-time `chmod` of a file the kernel deliberately locked, and a single wattage figure does not justify any of them — the Windows reading exists because an elevated helper *already had to exist* for the package temperature, not because power was worth elevating for.
+
 
 ## Discovery
 

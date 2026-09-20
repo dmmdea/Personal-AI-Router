@@ -689,3 +689,53 @@ func writePipeRequest(t *testing.T, conn net.Conn, id int, method string, params
 		t.Fatalf("write request: %v", err)
 	}
 }
+
+// TestNodeInfoRelayCarriesPowerWatts pins the re-marshal. This service decodes
+// node-info's response into its OWN structs and re-encodes them for the
+// broker, so a field missing from those structs is a field the UI never sees
+// for a manually-added node — which is how memory_pool was nearly lost. Power
+// travels the same path and gets the same guard, including the equality check
+// that decides whether a changed reading fires a node/updated event.
+func TestNodeInfoRelayCarriesPowerWatts(t *testing.T) {
+	const body = `{"GPUs":[{"name":"NVIDIA GeForce RTX 5070 Ti","vram_bytes":17179869184,` +
+		`"utilization_percent":41,"power_watts":210},{"name":"Intel UHD Graphics 630",` +
+		`"vram_bytes":70866960384,"memory_pool":"unified"}],` +
+		`"cpu":{"name":"CPU","cores":18,"utilization_percent":12,"power_watts":79},` +
+		`"telemetryValid":true,"msSince":12}`
+	var decoded NodeInfoResponse
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.GPUs[0].PowerWatts != 210 {
+		t.Fatalf("GPU power_watts = %v, want 210", decoded.GPUs[0].PowerWatts)
+	}
+	if decoded.CPU == nil || decoded.CPU.PowerWatts != 79 {
+		t.Fatalf("cpu = %+v, want power_watts 79", decoded.CPU)
+	}
+
+	out, err := json.Marshal(decoded.GPUs)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !strings.Contains(string(out), `"power_watts":210`) {
+		t.Fatalf("the re-marshal dropped the wattage: %s", out)
+	}
+	// The unmetered row must come back out without the field, not with a
+	// zero a client would render as "drawing no power".
+	if strings.Count(string(out), "power_watts") != 1 {
+		t.Fatalf("an unmetered row grew a power_watts: %s", out)
+	}
+
+	// A wattage that moves is a change: without this the broker would not be
+	// told, and a GPU ramping up would sit at its old figure.
+	hotter := []GPUInfo{{Name: "NVIDIA GeForce RTX 5070 Ti", VramBytes: 17179869184, UtilizationPercent: 41, PowerWatts: 240}}
+	if gpusEqual(decoded.GPUs[:1], hotter) {
+		t.Fatal("gpusEqual ignored a changed wattage")
+	}
+	if !cpuEqual(decoded.CPU, &CPUInfo{Name: "CPU", Cores: 18, UtilizationPercent: 12, PowerWatts: 79}) {
+		t.Fatal("cpuEqual reported a difference between identical readings")
+	}
+	if cpuEqual(decoded.CPU, &CPUInfo{Name: "CPU", Cores: 18, UtilizationPercent: 12, PowerWatts: 95}) {
+		t.Fatal("cpuEqual ignored a changed wattage")
+	}
+}

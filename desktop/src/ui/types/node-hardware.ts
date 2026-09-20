@@ -14,6 +14,10 @@ export type GpuInfo = {
     usageColor: string
     vramColor: string
     temperature: number // degrees Celsius, 0 = no reading
+    // Whole watts the device is drawing, 0 = nothing meters it. Shown beside
+    // the temperature ("50 °C (200 W)"), or on a line of its own when the
+    // device is metered but has no thermal readout.
+    power: number
     // "npu" for an accelerator row (no VRAM) or "board" for the motherboard
     // controller (no VRAM and no usage); absent for a GPU.
     kind?: string
@@ -27,6 +31,7 @@ export type CpuFallbackInfo = {
     usage: number // percentage 0-100
     usageColor: string
     temperature: number // degrees Celsius, 0 = no reading
+    power: number // whole watts, 0 = no reading
     memoryUsage: number // percentage 0-100
     memoryUsageFormatted: string
     memoryTotalFormatted: string

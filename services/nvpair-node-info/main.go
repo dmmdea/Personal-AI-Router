@@ -39,6 +39,12 @@ type GPUInfo struct {
 	// TemperatureCelsius is the device's thermal readout when its driver
 	// exposes one (accelerators do); zero drops it from JSON.
 	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+	// PowerWatts is the device's own power meter in whole watts: nvidia-smi's
+	// power.draw on an NVIDIA card (Linux and Windows alike) and the amdgpu
+	// hwmon PPT input on an AMD one. Zero — and so absent — on every device
+	// that has no meter: an integrated GPU, a Mali GPU, an RKNPU, an Edge TPU
+	// or Hailo module, the board row. See the ceilings table in README.md.
+	PowerWatts float64 `json:"power_watts,omitempty"`
 	// MemoryPool is noderec.GPUMemoryPoolUnified on a device whose VramBytes
 	// is a pool it shares with the host (every integrated GPU, the Mali and
 	// RKNPU rows, an AMD APU's carve-out + GTT, an nvidia UMA part) and empty
@@ -92,6 +98,12 @@ type CPUInfo struct {
 	// TemperatureCelsius is the CPU package temperature (Linux: hwmon
 	// coretemp/k10temp, refreshed per tick); zero drops it from JSON.
 	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+	// PowerWatts is the package power draw in whole watts, derived from the
+	// processor's energy counter between two collector ticks (Linux: the
+	// powercap RAPL package domain; Windows: MSR_PKG_ENERGY_STATUS through
+	// nvpair-sensors). Zero drops it from JSON, which is the normal answer on
+	// a Linux host where that counter is root-only — see README.md.
+	PowerWatts float64 `json:"power_watts,omitempty"`
 }
 
 // MemoryInfo is the node-level physical-RAM readout. TotalBytes is reported by
@@ -222,6 +234,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 			}
 			gpu.UtilizationPercent = s.UtilizationPct
 			gpu.TemperatureCelsius = s.TemperatureC
+			gpu.PowerWatts = s.PowerWatts
 		}
 	}
 
@@ -237,6 +250,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 		cpu := *cpuStatic
 		cpu.UtilizationPercent = snap.CPUUtilPct
 		cpu.TemperatureCelsius = snap.CPUTempC
+		cpu.PowerWatts = snap.CPUPowerWatts
 		resp.CPU = &cpu
 	}
 	if memTotal > 0 {

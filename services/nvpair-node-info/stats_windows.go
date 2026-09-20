@@ -495,10 +495,12 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	// LUID keys as the PDH counters; merged after the stale-preserve step so
 	// a previously published map is cloned, never mutated.
 	c.gpuTemps.mergeInto(snap)
-	// The CPU package temperature comes from the helper's pipe through its
-	// own poller; zero (omitted) while the helper is absent or its reading
-	// is stale.
+	// The CPU package temperature and power draw come from the helper's pipe
+	// through its own poller; zero (omitted) while the helper is absent or
+	// its reading is stale. Power is additionally zero on a part whose
+	// energy counter the helper could not resolve.
 	snap.CPUTempC = c.cpuTemp.current()
+	snap.CPUPowerWatts = c.cpuTemp.currentPower()
 	// Accelerator rows carry only a temperature, under their own statsKey.
 	c.mergeAccelStats(snap)
 	// The motherboard controller row does the same, from the report the CPU

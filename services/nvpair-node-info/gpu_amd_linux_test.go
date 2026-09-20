@@ -696,9 +696,16 @@ func TestLiveAMDGPUsOnThisHost(t *testing.T) {
 		if !ok {
 			t.Fatalf("no live sample under %q; got %v", gpu.statsKey, sampled)
 		}
-		t.Logf("sample: util=%d%% used=%d bytes temp=%d C", stat.UtilizationPct, stat.VRAMUsed, stat.TemperatureC)
+		t.Logf("sample: util=%d%% used=%d bytes temp=%d C power=%.0f W",
+			stat.UtilizationPct, stat.VRAMUsed, stat.TemperatureC, stat.PowerWatts)
 		if stat.TemperatureC == 0 {
 			t.Errorf("TemperatureC = 0, want a real edge reading")
+		}
+		// amdgpu registers power1_input on every part this service runs on.
+		// A zero here means the hwmon walk missed it, not that the socket is
+		// drawing nothing — an idling APU still reads the high teens.
+		if stat.PowerWatts == 0 {
+			t.Errorf("PowerWatts = 0, want the hwmon PPT reading")
 		}
 		if stat.VRAMUsed == 0 {
 			t.Errorf("VRAMUsed = 0, want the driver's usage figure")
@@ -728,4 +735,118 @@ func TestLiveCPUTemperatureOnThisHost(t *testing.T) {
 		t.Fatalf("cpu temperature = %d, %v; want a real reading", temp, ok)
 	}
 	t.Logf("cpu temperature: %d C", temp)
+}
+
+// TestAMDPowerPrefersThePPTInput: amdgpu labels its average socket power
+// input PPT. A hwmon that also exposes an unlabelled second input must not
+// win by sorting order, because the two are not the same measurement.
+func TestAMDPowerPrefersThePPTInput(t *testing.T) {
+	f := newAMDFakeTree(t)
+	dev := f.addCard("card1", "0000:04:00.0", apuAttrs(nil))
+	f.addHwmon(dev, "hwmon1", map[string]string{"name": "asus_ec", "power1_input": "125000000"})
+	f.addHwmon(dev, "hwmon2", map[string]string{
+		"name": "amdgpu", "power1_input": "19000000", "power1_label": "PPT",
+	})
+
+	got, ok := amdPowerWatts(dev)
+	if !ok || got != 19 {
+		t.Fatalf("amdPowerWatts = %v, %v; want 19, true (amdgpu's PPT, not the board's)", got, ok)
+	}
+}
+
+// TestAMDPowerFallsBackToPower1 covers an unlabelled hwmon: power1 is what
+// amdgpu registers the socket meter as, and microwatts round to whole watts.
+func TestAMDPowerFallsBackToPower1(t *testing.T) {
+	f := newAMDFakeTree(t)
+	dev := f.addCard("card1", "0000:04:00.0", apuAttrs(nil))
+	f.addHwmon(dev, "hwmon2", map[string]string{"name": "amdgpu", "power1_input": "22600000"})
+
+	got, ok := amdPowerWatts(dev)
+	if !ok || got != 23 {
+		t.Fatalf("amdPowerWatts = %v, %v; want 23, true", got, ok)
+	}
+}
+
+// TestAMDPowerUnavailable: a card whose driver publishes no power attribute,
+// and one whose attribute is unreadable, both report unavailable so
+// power_watts drops from the JSON instead of claiming the card draws nothing.
+func TestAMDPowerUnavailable(t *testing.T) {
+	f := newAMDFakeTree(t)
+	bare := f.addCard("card1", "0000:04:00.0", apuAttrs(nil))
+	if got, ok := amdPowerWatts(bare); ok {
+		t.Errorf("amdPowerWatts with no hwmon = %v, true; want unavailable", got)
+	}
+
+	noPower := f.addCard("card2", "0000:05:00.0", apuAttrs(nil))
+	f.addHwmon(noPower, "hwmon3", map[string]string{"name": "amdgpu", "temp1_input": "45000"})
+	if got, ok := amdPowerWatts(noPower); ok {
+		t.Errorf("amdPowerWatts on a card with no power input = %v, true; want unavailable", got)
+	}
+
+	broken := f.addCard("card3", "0000:06:00.0", apuAttrs(nil))
+	f.addHwmon(broken, "hwmon4", map[string]string{
+		"name": "amdgpu", "power1_input": "not-a-number", "power1_label": "PPT",
+	})
+	if got, ok := amdPowerWatts(broken); ok {
+		t.Errorf("amdPowerWatts on an unparseable input = %v, true; want unavailable", got)
+	}
+}
+
+// TestDecodeAMDCarriesPower folds the reading into the sample map the way the
+// collector does, and pins that a card reporting ONLY power still reaches the
+// map: the "any" gate exists so a card with no busy counter is not dropped
+// along with its wattage.
+func TestDecodeAMDCarriesPower(t *testing.T) {
+	f := newAMDFakeTree(t)
+	full := f.addCard("card1", "0000:04:00.0", apuAttrs(map[string]string{"gpu_busy_percent": "13"}))
+	f.addHwmon(full, "hwmon2", map[string]string{
+		"name": "amdgpu", "temp1_input": "52000", "temp1_label": "edge",
+		"power1_input": "19000000", "power1_label": "PPT",
+	})
+	powerOnly := f.addCard("card2", "0000:05:00.0", apuAttrs(nil))
+	f.addHwmon(powerOnly, "hwmon3", map[string]string{
+		"name": "amdgpu", "power1_input": "8000000", "power1_label": "PPT",
+	})
+
+	out := map[string]gpuStat{}
+	decodeAMD(f.drmRoot, out)
+	if len(out) != 2 {
+		t.Fatalf("decodeAMD published %d rows: %+v", len(out), out)
+	}
+	for key, stat := range out {
+		switch stat.PowerWatts {
+		case 19:
+			if stat.UtilizationPct != 13 || stat.TemperatureC != 52 {
+				t.Errorf("%s = %+v, want 13%% / 52 C beside its 19 W", key, stat)
+			}
+		case 8:
+			if stat.UtilizationPct != 0 || stat.TemperatureC != 0 {
+				t.Errorf("%s = %+v, want power only", key, stat)
+			}
+		default:
+			t.Errorf("%s = %+v, want 19 or 8 watts", key, stat)
+		}
+	}
+}
+
+// TestMicrowattsToWatts pins the unit conversion and its rejections.
+func TestMicrowattsToWatts(t *testing.T) {
+	cases := []struct {
+		in    string
+		want  float64
+		wantO bool
+	}{
+		{in: "19000000", want: 19, wantO: true},
+		{in: "22600000\n", want: 23, wantO: true},
+		{in: "0", want: 0, wantO: true},
+		{in: "-1"},
+		{in: "N/A"},
+		{in: ""},
+	}
+	for _, c := range cases {
+		got, ok := microwattsToWatts(c.in)
+		if got != c.want || ok != c.wantO {
+			t.Errorf("microwattsToWatts(%q) = %v, %v; want %v, %v", c.in, got, ok, c.want, c.wantO)
+		}
+	}
 }

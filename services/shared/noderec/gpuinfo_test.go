@@ -169,3 +169,64 @@ func TestGPUMemoryPoolUnifiedValue(t *testing.T) {
 		t.Fatalf("GPUMemoryPoolUnified = %q, want \"unified\"", GPUMemoryPoolUnified)
 	}
 }
+
+// TestPowerWattsWireShape pins the power field on both records the node
+// inventory carries.
+//
+// Power is additive in exactly the way temperature was: a row from a device
+// nothing meters must serialize as it did before this field existed, because
+// most of the inventory IS unmeterable — an integrated GPU, a Mali GPU, an
+// RKNPU, an Edge TPU, a Hailo module and the board row have no power
+// telemetry at all, and a literal 0 there would render as "drawing nothing".
+// So the only rows that carry power_watts are the ones whose driver actually
+// metered them.
+func TestPowerWattsWireShape(t *testing.T) {
+	unmetered, _ := json.Marshal(GPUInfo{Name: "Intel UHD Graphics 630", VramBytes: 1, MemoryPool: GPUMemoryPoolUnified})
+	if strings.Contains(string(unmetered), "power_watts") {
+		t.Fatalf("a row with no meter must not carry power_watts: %s", unmetered)
+	}
+	accel, _ := json.Marshal(GPUInfo{Name: "Google Coral Edge TPU", Kind: GPUKindAccelerator, TemperatureCelsius: 52})
+	if strings.Contains(string(accel), "power_watts") {
+		t.Fatalf("an Edge TPU reports no power: %s", accel)
+	}
+
+	metered, _ := json.Marshal(GPUInfo{Name: "NVIDIA GeForce RTX 5070 Ti", VramBytes: 1, TemperatureCelsius: 38, PowerWatts: 36})
+	for _, want := range []string{`"temperature_celsius":38`, `"power_watts":36`} {
+		if !strings.Contains(string(metered), want) {
+			t.Fatalf("metered GPU row missing %s: %s", want, metered)
+		}
+	}
+
+	// A number, not a string: the desktop reads it with the same numeric
+	// decoder every other telemetry field goes through.
+	if strings.Contains(string(metered), `"power_watts":"`) {
+		t.Fatalf("power_watts must be a JSON number: %s", metered)
+	}
+
+	coldCPU, _ := json.Marshal(CPUInfo{Name: "CPU", Cores: 8, UtilizationPercent: 3})
+	if strings.Contains(string(coldCPU), "power_watts") {
+		t.Fatalf("a CPU with no readable energy counter must not carry power_watts: %s", coldCPU)
+	}
+	hotCPU, _ := json.Marshal(CPUInfo{Name: "CPU", Cores: 8, TemperatureCelsius: 55, PowerWatts: 140})
+	if !strings.Contains(string(hotCPU), `"power_watts":140`) {
+		t.Fatalf("metered CPU row missing power_watts: %s", hotCPU)
+	}
+
+	// Round-trips: the scanner and the broker decode and re-encode every
+	// record, and a hop that drops the field would blank the figure at the
+	// far end exactly as it would have for the pool marker.
+	var backGPU GPUInfo
+	if err := json.Unmarshal(metered, &backGPU); err != nil {
+		t.Fatalf("decode GPU: %v", err)
+	}
+	if backGPU.PowerWatts != 36 {
+		t.Fatalf("GPUInfo.PowerWatts = %v, want 36 after a round trip", backGPU.PowerWatts)
+	}
+	var backCPU CPUInfo
+	if err := json.Unmarshal(hotCPU, &backCPU); err != nil {
+		t.Fatalf("decode CPU: %v", err)
+	}
+	if backCPU.PowerWatts != 140 {
+		t.Fatalf("CPUInfo.PowerWatts = %v, want 140 after a round trip", backCPU.PowerWatts)
+	}
+}

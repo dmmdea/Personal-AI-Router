@@ -4,7 +4,13 @@
 import { memo } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { CpuFallbackInfo, GpuInfo } from '@/ui/types/node-hardware'
-import { memoryLabel, memoryLineValue, showsUsage, showsVram } from '@/ui/utils/hardware-rows'
+import {
+    memoryLabel,
+    memoryLineValue,
+    showsMemoryLine,
+    showsUsage,
+    thermalLine
+} from '@/ui/utils/hardware-rows'
 
 const dotSize = '10px'
 
@@ -30,6 +36,7 @@ function NodeChartLegend({
     cpuFallbackInfo?: CpuFallbackInfo | null
 }) {
     if (cpuFallbackInfo) {
+        const cpuThermal = thermalLine(cpuFallbackInfo.temperature, cpuFallbackInfo.power)
         return (
             <Stack gap="1">
                 <Text kind="body/semibold/sm">{cpuFallbackInfo.model}</Text>
@@ -40,9 +47,12 @@ function NodeChartLegend({
                             CPU
                         </Text>
                         <Text kind="body/semibold/sm">{cpuFallbackInfo.usage}%</Text>
-                        {cpuFallbackInfo.temperature > 0 && (
+                        {/* "55 °C (140 W)", the wattage only where something
+                            meters the package, and "140 W" alone on a host
+                            that meters but cannot read a temperature. */}
+                        {cpuThermal && (
                             <Text kind="body/regular/sm" className="text-subtle-color">
-                                {cpuFallbackInfo.temperature} °C
+                                {cpuThermal.value}
                             </Text>
                         )}
                     </Flex>
@@ -63,53 +73,59 @@ function NodeChartLegend({
 
     return (
         <Stack gap="3">
-            {gpuInfo.map(gpu => (
-                <Stack key={gpu.id} gap="1">
-                    <Text kind="body/semibold/sm">{gpu.name}</Text>
-                    {/* The motherboard controller reports no busy figure at
+            {gpuInfo.map(gpu => {
+                const thermal = thermalLine(gpu.temperature, gpu.power)
+                return (
+                    <Stack key={gpu.id} gap="1">
+                        <Text kind="body/semibold/sm">{gpu.name}</Text>
+                        {/* The motherboard controller reports no busy figure at
                         all, so it gets no Usage line rather than a "0%" that
                         would read as idle. */}
-                    {showsUsage(gpu) && (
-                        <Flex align="center" gap="2">
-                            <ColorDot color={gpu.usageColor} />
+                        {showsUsage(gpu) && (
                             <Flex align="center" gap="2">
-                                <Text kind="body/regular/sm" className="text-subtle-color">
-                                    Usage
-                                </Text>
-                                <Text kind="body/semibold/sm">{gpu.usage}%</Text>
+                                <ColorDot color={gpu.usageColor} />
+                                <Flex align="center" gap="2">
+                                    <Text kind="body/regular/sm" className="text-subtle-color">
+                                        Usage
+                                    </Text>
+                                    <Text kind="body/semibold/sm">{gpu.usage}%</Text>
+                                </Flex>
                             </Flex>
-                        </Flex>
-                    )}
-                    {/* An accelerator (Edge TPU / NPU) and the motherboard
+                        )}
+                        {/* An accelerator (Edge TPU / NPU) and the motherboard
                         controller have no VRAM figure; the row would only ever
                         read "0 B / 0 B". A device sharing the host's memory
-                        reads "Shared", with a used figure only if it measured
-                        one — see ui/utils/hardware-rows.ts. */}
-                    {showsVram(gpu) && (
-                        <Flex align="center" gap="2">
-                            <ColorDot color={gpu.vramColor} />
-                            <Text kind="body/regular/sm" className="text-subtle-color">
-                                {memoryLabel(gpu)}
-                            </Text>
-                            <Text kind="body/semibold/sm">
-                                {memoryLineValue(gpu, gpu.vramUsedBytes)}
-                            </Text>
-                        </Flex>
-                    )}
-                    {/* A device without a thermal readout (an integrated GPU, a
-                        host without nvidia-smi) gets no Temp row rather than a
-                        placeholder, matching the CPU line. */}
-                    {gpu.temperature > 0 && (
-                        <Flex align="center" gap="2">
-                            <ColorDot color={gpu.usageColor} />
-                            <Text kind="body/regular/sm" className="text-subtle-color">
-                                Temp
-                            </Text>
-                            <Text kind="body/semibold/sm">{gpu.temperature} °C</Text>
-                        </Flex>
-                    )}
-                </Stack>
-            ))}
+                        reads "Shared" — and gets a line only when something
+                        measured the pool, because a bare shared ceiling is a
+                        static number among live ones. See hardware-rows.ts. */}
+                        {showsMemoryLine(gpu, gpu.vramUsedBytes) && (
+                            <Flex align="center" gap="2">
+                                <ColorDot color={gpu.vramColor} />
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    {memoryLabel(gpu)}
+                                </Text>
+                                <Text kind="body/semibold/sm">
+                                    {memoryLineValue(gpu, gpu.vramUsedBytes)}
+                                </Text>
+                            </Flex>
+                        )}
+                        {/* "Temp 50 °C (200 W)" — one line for one device state.
+                        A device with neither reading (an integrated GPU, a
+                        host without nvidia-smi) gets no row rather than a
+                        placeholder; one that is metered but has no thermal
+                        readout gets "Power 200 W" instead. */}
+                        {thermal && (
+                            <Flex align="center" gap="2">
+                                <ColorDot color={gpu.usageColor} />
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    {thermal.label}
+                                </Text>
+                                <Text kind="body/semibold/sm">{thermal.value}</Text>
+                            </Flex>
+                        )}
+                    </Stack>
+                )
+            })}
         </Stack>
     )
 }
