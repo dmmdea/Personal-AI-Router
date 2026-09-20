@@ -21,7 +21,10 @@ import (
 // millidegrees Celsius, optionally labelled by temp<N>_label; the package
 // reading is the one labelled "Package id 0" (coretemp) or "Tctl"/"Tdie"
 // (k10temp). When no label matches, the first input of the CPU driver is used.
-// As a last resort the thermal class zone typed x86_pkg_temp is read.
+// When no hwmon driver matches at all — an Arm SoC names its hwmon entries
+// after thermal zones (soc_thermal, bigcore0_thermal, ...) rather than after a
+// CPU driver — the thermal class is searched instead, in cpuThermalZoneTypes
+// order.
 //
 // A host that has none of these (a VM, an unusual board) reports nothing, and
 // the omitempty tag drops cpu.temperature_celsius from the JSON.
@@ -43,6 +46,14 @@ var cpuHwmonDrivers = map[string]bool{
 // opposed to per-core) reading, in preference order.
 var cpuPackageLabels = []string{"package id 0", "tctl", "tdie", "cpu"}
 
+// cpuThermalZoneTypes are the thermal-zone `type` values read when no hwmon CPU
+// driver matched, in preference order: the x86 package zone first, then the
+// zone names Arm SoCs use. A board with per-cluster zones (RK3588S publishes
+// bigcore0/bigcore1/littlecore alongside soc-thermal) has no single "the CPU"
+// sensor, so the SoC-wide zone is the honest answer and is preferred over
+// arbitrarily picking one cluster.
+var cpuThermalZoneTypes = []string{"x86_pkg_temp", "cpu-thermal", "soc-thermal", "cpu_thermal"}
+
 // hwmonTempSensor is one temp<N>_input of a CPU hwmon driver.
 type hwmonTempSensor struct {
 	input string // path to temp<N>_input
@@ -58,11 +69,21 @@ type cpuTempSource struct {
 // findCPUTempSource locates the package sensor. Returns an empty source when
 // the host exposes none.
 func findCPUTempSource() cpuTempSource {
-	if p := findHwmonCPUPackage(hwmonClassDir); p != "" {
+	return findCPUTempSourceIn(hwmonClassDir, thermalClassDir)
+}
+
+// findCPUTempSourceIn is findCPUTempSource against explicit class roots: hwmon
+// first (a named CPU driver is unambiguous), then the thermal zones in
+// cpuThermalZoneTypes order, first present wins. Parameterized so the search
+// order is testable against a fake tree.
+func findCPUTempSourceIn(hwmonRoot, thermalRoot string) cpuTempSource {
+	if p := findHwmonCPUPackage(hwmonRoot); p != "" {
 		return cpuTempSource{path: p}
 	}
-	if p := findThermalZone(thermalClassDir, "x86_pkg_temp"); p != "" {
-		return cpuTempSource{path: p}
+	for _, zoneType := range cpuThermalZoneTypes {
+		if p := findThermalZone(thermalRoot, zoneType); p != "" {
+			return cpuTempSource{path: p}
+		}
 	}
 	return cpuTempSource{}
 }

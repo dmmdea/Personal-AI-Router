@@ -183,6 +183,54 @@ A live check against real hardware ships with the tests and is skipped unless `N
 ```
 go test -c -o hailo_windows.test.exe
 NVPAIR_LIVE_HAILO=1 hailo_windows.test.exe -test.run TestLiveHailoAccelerator -test.v
+
+- **Linux** (first-class): NVIDIA GPU inventory, dedicated VRAM usage, utilization and temperature come from `nvidia-smi`; CPU and system-memory usage come from `/proc`, the CPU package temperature from hwmon (`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`, else the first present of the `x86_pkg_temp`, `cpu-thermal`, `soc-thermal` and `cpu_thermal` thermal zones). Unified-memory GPUs use the `/proc/meminfo` system-memory snapshot even when dynamic `nvidia-smi` collection is unavailable. Non-NVIDIA adapters fall back to names from `ghw` without dynamic GPU stats. Inference accelerators behind the gasket/apex driver (Google Coral Edge TPU, `/sys/class/apex/*`) are listed with `kind:"npu"`; the driver keeps no busy counter, so `utilization_percent` is the fraction of 100 ms sub-intervals in the last second in which the device's `interrupt_counts` moved (the same "percent of time working" definition as `nvidia-smi`'s `utilization.gpu`, at coarser resolution), and `temperature_celsius` comes from its `temp` attribute. Arm SoC boards have their own detectors — see *Linux Rockchip* below.
+- **macOS**: CPU and system-memory usage come from Mach through gopsutil's purego bindings. GPU identity, mapped memory, and utilization come from the built-in, unprivileged `/usr/sbin/ioreg` command's `IOAccelerator` `PerformanceStatistics`; no sudo or private framework binding is required. Apple Silicon is supported directly. Intel/AMD fields are best-effort when their drivers expose the same dedicated-memory counters. The performance keys are undocumented and may change across macOS releases; a missing or changed key leaves only that metric out and does not stop CPU or memory collection.
+- **Other platforms**: GPU names come from `ghw`; VRAM and dynamic stats are not reported.
+
+### Linux Rockchip (Mali via devfreq, RKNPU via debugfs)
+
+Rockchip RK35xx boards (measured on an RK3588S, vendor kernel 6.1) have no `nvidia-smi` and no PCI display adapter, so both Linux GPU detectors come back empty. Their two inference-capable devices are platform devices found in sysfs instead, and both are listed in the same `GPUs` inventory:
+
+| device | row | `statsKey` | utilization | temperature |
+| --- | --- | --- | --- | --- |
+| Arm Mali GPU | `"Arm Mali-G610 MP4"` (from `/sys/class/misc/mali0/device/gpuinfo`) | `mali:<devfreq node>` | devfreq `load`, `"<busy%>@<freq>Hz"`; the driver's `utilisation` attribute (0..100) when a kernel exposes no devfreq load | thermal zone `gpu-thermal` |
+| RKNPU | `"Rockchip RK3588 NPU (3 cores)"`, `kind:"npu"` (SoC from the device-tree `compatible`, core count from the driver) | `rknpu:<devfreq node>` | `/sys/kernel/debug/rknpu/load`, the mean across cores | thermal zone `npu-thermal` |
+
+Both are sampled in their own goroutine once a second and folded into the collector's snapshot, so a wedged driver node cannot delay the 1 s tick. Neither marks `telemetryValid`: PAIR's engines run on neither device, exactly as for a Coral Edge TPU.
+
+Memory is unified on these SoCs — there is no dedicated VRAM — so both rows report total system RAM as `vram_bytes` and the sampled system-memory usage as `vram_used_bytes`, the same contract a unified-memory NVIDIA GPU uses.
+
+**The NPU's utilization requires readable debugfs.** The RKNPU devfreq node also publishes a `load`, but it reads a constant `100@…Hz` while the NPU is idle, so it is never used; the driver's real per-core counter is only in debugfs, which the kernel mounts `0700` (root only). Without it the NPU row stays in the inventory with its temperature, `utilization_percent` is omitted, and the service logs one line naming the file and the fix. To make it readable by the unprivileged service, remount debugfs world-readable at boot (e.g. a small systemd unit ordered before the service):
+
+```sh
+mount -o remount,mode=755 /sys/kernel/debug
+```
+
+The service never attempts the remount itself, and it reads nothing else from debugfs.
+
+CPU identity on these boards is repaired from the device tree, because `/proc/cpuinfo` gives `ghw` neither a model name nor the full core count: the kernel groups the asymmetric clusters into separate packages, so `ghw` reports one cluster (4) rather than the SoC's 8 cores. `/proc/device-tree/model` and the first `compatible` entry supply the board and the SoC, and the `processor` entries of `/proc/cpuinfo` raise the core count — both only on a host that has a device tree, so an x86 host keeps `ghw`'s physical-core count untouched. The CPU package temperature falls back to the `cpu-thermal`, `soc-thermal` and `cpu_thermal` thermal zones (in that order, after `x86_pkg_temp`) because no hwmon entry on these boards names a CPU driver; the SoC-wide zone is preferred over arbitrarily picking one cluster's.
+
+A live response from an idle board:
+
+```json
+{
+  "GPUs": [
+    {"name": "Arm Mali-G610 MP4", "vram_bytes": 8587837440, "vram_used_bytes": 907354112, "temperature_celsius": 40},
+    {"name": "Rockchip RK3588 NPU (3 cores)", "vram_bytes": 8587837440, "vram_used_bytes": 907354112, "kind": "npu", "temperature_celsius": 41}
+  ],
+  "cpu": {"name": "Rockchip RK3588S (Orange Pi 5)", "cores": 8, "utilization_percent": 9, "temperature_celsius": 42},
+  "memory": {"total_bytes": 8587837440, "used_bytes": 907354112},
+  "telemetryValid": false,
+  "msSince": 0
+}
+```
+
+The board-specific path is covered by unit tests against fake sysfs trees plus one live test, gated on `NVPAIR_LIVE_ROCKCHIP=1`, that runs the real detectors and collector on the hardware:
+
+```sh
+GOOS=linux GOARCH=arm64 go test -c -o rockchip_arm64.test     # cross-compile
+NVPAIR_LIVE_ROCKCHIP=1 ./rockchip_arm64.test -test.v          # on the board
 ```
 
 ## Shutdown

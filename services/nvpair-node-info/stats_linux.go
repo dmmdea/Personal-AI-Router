@@ -169,6 +169,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	sampledAt = amdSampleAt(gpu, sampledAt)
 	applyGPUStats(previous, snap, gpu, sampledAt)
 	c.mergeAccelStats(snap)
+	mergeRockchipStats(snap)
 	return snap
 }
 
