@@ -573,11 +573,19 @@ body .os-scrollbar {
  */
 .node-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(780px, 100%), 1fr));
-    /* Each card keeps its own height. Stretching is the grid default, and it
-       would inflate every card in a row to the height of an expanded
-       neighbour, leaving tall empty panels beside it. */
-    align-items: start;
+    /* Cards need room for a chart beside a legend with long device names, so
+       the track minimum is generous (1040px) and the count is capped at three:
+       a 4K window gets three ~1100px cards rather than four cramped ones. */
+    grid-template-columns: repeat(auto-fit, minmax(min(1040px, 100%), 1fr));
+    /* Rows share a height (the grid default) so the cards of a row read as
+       uniform tiles instead of floating at different depths. */
+    align-items: stretch;
+}
+
+@media (min-width: 3400px) {
+    .node-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
 }
 
 .node-card {
