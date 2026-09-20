@@ -318,28 +318,8 @@ func TestIntelModelName(t *testing.T) {
 	}
 }
 
-// TestIntelModelNameNamesTheGeneration mirrors the AMD rule: a node list has
-// to say which graphics generation the part is, because that is what decides
-// what it can run. A bare marketing name does not.
-func TestIntelModelNameNamesTheGeneration(t *testing.T) {
-	architectures := []string{"Gen 9.5", "Xe-LP", "Xe-HPG", "Xe-LPG", "Xe2", "Xe2-HPG"}
-	for id := range intelModels {
-		name := intelModelName(id)
-		named := false
-		for _, arch := range architectures {
-			if strings.HasSuffix(name, ", "+arch+")") {
-				named = true
-				break
-			}
-		}
-		if !named {
-			t.Errorf("intelModels[%q] = %q; every name must end in a known architecture %v", id, name, architectures)
-		}
-		if !strings.HasPrefix(name, "Intel ") {
-			t.Errorf("intelModels[%q] = %q; want a vendor-prefixed name", id, name)
-		}
-	}
-}
+// The table-wide invariants (every name ends in a known architecture, every
+// name is vendor-prefixed) moved with the table to nvpair-shared/gpunames.
 
 // TestDetectIntelGPUsUnlistedIDKeepsTheRow: a part released after intelModels
 // was written is still published, under a name that carries its device id, so

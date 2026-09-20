@@ -8,8 +8,13 @@ package main
 import (
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
+
+	"nvpair-shared/gpunames"
 )
 
 // TestDXGIAdapterDesc1Size pins the in-Go layout of dxgiAdapterDesc1 to the
@@ -61,6 +66,133 @@ func TestIsVirtualDisplayAdapter(t *testing.T) {
 	for _, tc := range cases {
 		if got := isVirtualDisplayAdapter(tc.name); got != tc.want {
 			t.Errorf("isVirtualDisplayAdapter(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// fakeAdapterDesc builds a DXGI_ADAPTER_DESC1 the way DXGI fills one in: a
+// UTF-16 Description (NUL-padded to 128 units) beside the PCI vendor/device
+// pair. It is the whole input adapterName reads, so the name-selection rule
+// is testable without a GPU, a driver or COM.
+func fakeAdapterDesc(vendorID, deviceID uint32, description string) dxgiAdapterDesc1 {
+	desc := dxgiAdapterDesc1{VendorID: vendorID, DeviceID: deviceID}
+	copy(desc.Description[:len(desc.Description)-1], windows.StringToUTF16(description))
+	return desc
+}
+
+// TestAdapterName pins the whole naming rule: an Intel or AMD adapter the
+// shared table knows is published under the table's name, and everything else
+// keeps DXGI's Description byte for byte. The Tiger Lake and Coffee Lake rows
+// are the two measured hosts whose Windows rows used to disagree with their
+// Linux counterparts.
+func TestAdapterName(t *testing.T) {
+	cases := []struct {
+		name        string
+		vendorID    uint32
+		deviceID    uint32
+		description string
+		want        string
+	}{
+		{
+			name:        "Intel Tiger Lake GT1 gains its generation",
+			vendorID:    gpunames.PCIVendorIntel,
+			deviceID:    0x9a60,
+			description: "Intel(R) UHD Graphics",
+			want:        "Intel UHD Graphics (Tiger Lake, Xe-LP)",
+		},
+		{
+			name:        "Intel Coffee Lake GT2 gains its generation",
+			vendorID:    gpunames.PCIVendorIntel,
+			deviceID:    0x3e98,
+			description: "Intel(R) UHD Graphics 630",
+			want:        "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)",
+		},
+		{
+			name:        "Intel Raptor Lake iGPU",
+			vendorID:    gpunames.PCIVendorIntel,
+			deviceID:    0xa780,
+			description: "Intel(R) UHD Graphics 770",
+			want:        "Intel UHD Graphics 770 (Raptor Lake, Xe-LP)",
+		},
+		{
+			name:        "discrete Arc card",
+			vendorID:    gpunames.PCIVendorIntel,
+			deviceID:    0xe20b,
+			description: "Intel(R) Arc(TM) B580 Graphics",
+			want:        "Intel Arc B580 (Battlemage, Xe2-HPG)",
+		},
+		{
+			name:        "AMD APU gains its architecture",
+			vendorID:    gpunames.PCIVendorAMD,
+			deviceID:    0x15e7,
+			description: "AMD Radeon(TM) Graphics",
+			want:        "AMD Radeon Vega Graphics (Barcelo, GCN 5.1)",
+		},
+		{
+			name:        "unlisted Intel id keeps the DXGI description",
+			vendorID:    gpunames.PCIVendorIntel,
+			deviceID:    0xffff,
+			description: "Intel(R) Next Graphics",
+			want:        "Intel(R) Next Graphics",
+		},
+		{
+			name:        "unlisted AMD id keeps the DXGI description",
+			vendorID:    gpunames.PCIVendorAMD,
+			deviceID:    0x73bf,
+			description: "AMD Radeon RX 6900 XT",
+			want:        "AMD Radeon RX 6900 XT",
+		},
+		{
+			name:        "NVIDIA is never touched",
+			vendorID:    0x10de,
+			deviceID:    0x2c02,
+			description: "NVIDIA GeForce RTX 5080",
+			want:        "NVIDIA GeForce RTX 5080",
+		},
+		{
+			// An NVIDIA device id that collides numerically with an Intel one
+			// must still pass through: the vendor gate is what decides.
+			name:        "NVIDIA id colliding with an Intel table entry",
+			vendorID:    0x10de,
+			deviceID:    0x3e98,
+			description: "NVIDIA RTX A2",
+			want:        "NVIDIA RTX A2",
+		},
+		{
+			name:        "empty description stays empty",
+			vendorID:    0x10de,
+			deviceID:    0x2c02,
+			description: "",
+			want:        "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := fakeAdapterDesc(tc.vendorID, tc.deviceID, tc.description)
+			if got := adapterName(&desc); got != tc.want {
+				t.Errorf("adapterName(%#04x:%#04x, %q) = %q, want %q",
+					tc.vendorID, tc.deviceID, tc.description, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAdapterNameNeverLosesAName is the "never worse than today" guarantee in
+// test form: for a non-empty DXGI description, the published name is either
+// the table's or DXGI's, never empty and never a bare device id.
+func TestAdapterNameNeverLosesAName(t *testing.T) {
+	const description = "Some Vendor Display Adapter"
+	for _, vendorID := range []uint32{gpunames.PCIVendorIntel, gpunames.PCIVendorAMD, 0x10de, 0x1414} {
+		for _, deviceID := range []uint32{0x0000, 0x3e98, 0x15e7, 0x9a60, 0xffff} {
+			desc := fakeAdapterDesc(vendorID, deviceID, description)
+			got := adapterName(&desc)
+			if got == "" {
+				t.Errorf("adapterName(%#04x:%#04x) returned an empty name", vendorID, deviceID)
+			}
+			if strings.Contains(got, "(device 0x") {
+				t.Errorf("adapterName(%#04x:%#04x) = %q; the generic id fallback must never reach a DXGI row",
+					vendorID, deviceID, got)
+			}
 		}
 	}
 }
@@ -195,6 +327,42 @@ func TestDetectGPUsLive(t *testing.T) {
 	t.Logf("enumerated %d candidate adapter(s), detection reported %d", len(candidates), len(gpus))
 	if len(candidates) < len(gpus) {
 		t.Fatalf("enumerated %d candidates but detection reported %d GPUs", len(candidates), len(gpus))
+	}
+
+	// The naming rule, checked against whatever this host actually has. On the
+	// 3-card NVIDIA workstation every row must still be the driver's own
+	// string; on the Tiger Lake laptop and the Coffee Lake desktop the Intel
+	// row must now carry its codename and architecture, matching what the
+	// Linux sysfs inventory publishes for the same silicon.
+	for _, c := range candidates {
+		table, listed := "", false
+		switch c.vendorID {
+		case gpunames.PCIVendorIntel:
+			table, listed = gpunames.Intel(c.deviceID)
+		case gpunames.PCIVendorAMD:
+			table, listed = gpunames.AMD(c.deviceID)
+		}
+		t.Logf("adapter %04x:%04x dxgi=%q published=%q table_listed=%v",
+			c.vendorID, c.deviceID, c.dxgiDescription, c.gpu.Name, listed)
+		switch {
+		case listed:
+			if c.gpu.Name != table {
+				t.Errorf("adapter %04x:%04x published %q, want the table name %q",
+					c.vendorID, c.deviceID, c.gpu.Name, table)
+			}
+		default:
+			if c.gpu.Name != c.dxgiDescription {
+				t.Errorf("adapter %04x:%04x published %q, want DXGI's %q unchanged",
+					c.vendorID, c.deviceID, c.gpu.Name, c.dxgiDescription)
+			}
+		}
+		if c.vendorID == 0x10de && c.gpu.Name != c.dxgiDescription {
+			t.Errorf("NVIDIA adapter %04x:%04x was renamed to %q; NVIDIA rows must pass through",
+				c.vendorID, c.deviceID, c.gpu.Name)
+		}
+		if c.gpu.Name == "" {
+			t.Errorf("adapter %04x:%04x published an empty name", c.vendorID, c.deviceID)
+		}
 	}
 
 	stale := make(map[uint64]struct{}, len(candidates))

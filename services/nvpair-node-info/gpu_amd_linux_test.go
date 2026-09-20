@@ -299,41 +299,10 @@ func TestAMDModelName(t *testing.T) {
 	}
 }
 
-// TestAMDModelNameNamesTheGenerationAndNeverTheCoreCount is the rule the table
-// exists to enforce. The compute-unit count is NOT derivable from the device
-// id - 0x15e7 alone ships as Vega 6, Vega 7 and Vega 8, separated only by the
-// PCI revision id - so printing one is a guess that is wrong on most SKUs. The
-// generation is derivable, and is what the operator asked to see.
-func TestAMDModelNameNamesTheGenerationAndNeverTheCoreCount(t *testing.T) {
-	architectures := []string{"GCN 5", "GCN 5.1", "RDNA 2", "RDNA 3", "RDNA 3.5"}
-	for id, model := range amdModels {
-		name := amdModelName(id, "")
-		named := false
-		for _, arch := range architectures {
-			if strings.HasSuffix(name, ", "+arch+")") {
-				named = true
-				break
-			}
-		}
-		if !named {
-			t.Errorf("amdModels[%q] = %q; every name must end in a known architecture %v", id, name, architectures)
-		}
-		if !strings.Contains(name, " (") {
-			t.Errorf("amdModels[%q] = %q; want the \"<name> (<codename>, <architecture>)\" shape", id, name)
-		}
-		// "Vega 7" and friends are core counts, not generations. "Vega
-		// Graphics" (no digit) is the marketing name AMD itself uses for the
-		// whole family and is allowed.
-		for _, banned := range []string{"Vega 3", "Vega 6", "Vega 7", "Vega 8", "Vega 10", "Vega 11", " CU", "cores"} {
-			if strings.Contains(name, banned) {
-				t.Errorf("amdModels[%q] = %q contains %q: a compute-unit count cannot be derived from a device id", id, name, banned)
-			}
-		}
-		if !model.apu {
-			t.Errorf("amdModels[%q] is not marked apu; every listed part is an integrated GPU", id)
-		}
-	}
-}
+// The table-wide invariants (every name ends in a known architecture, every
+// name has the "<name> (<codename>, <architecture>)" shape, no name carries a
+// compute-unit count, every listed part is an APU) moved with the table to
+// nvpair-shared/gpunames.
 
 // TestAMDModelNameFallbackDerivesArchitectureFromGCIP covers a part released
 // after amdModels was written. amdgpu publishes the ASIC's own Graphics Core
