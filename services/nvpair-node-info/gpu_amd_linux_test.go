@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 // The amdgpu inventory and sampler are pure sysfs readers, so every case below
@@ -171,6 +173,49 @@ func TestDetectAMDGPUsAPUCapacityIsVRAMPlusGTT(t *testing.T) {
 	}
 	if got.usesSystemMemoryUsage {
 		t.Error("usesSystemMemoryUsage set: amdgpu reports its own usage, /proc/meminfo must not override it")
+	}
+	// The capacity is a pool the CPU shares, so the row says so — and unlike
+	// the sysfs-only unified rows this one still publishes a used figure,
+	// because the driver measures vram_used + gtt_used for this device.
+	if got.MemoryPool != noderec.GPUMemoryPoolUnified {
+		t.Errorf("MemoryPool = %q, want %q: an APU's capacity is carve-out + GTT out of system RAM",
+			got.MemoryPool, noderec.GPUMemoryPoolUnified)
+	}
+}
+
+// TestDetectAMDGPUsAPURowKeepsItsOwnUsedFigure is the APU's place in the
+// unified-memory contract, asserted on the wire. Every other shared-pool row
+// in this service omits vram_used_bytes because nothing measures it; the APU
+// is the exception that must NOT be swept up with them, and the number it
+// publishes has to be the driver's rather than the host's.
+func TestDetectAMDGPUsAPURowKeepsItsOwnUsedFigure(t *testing.T) {
+	f := newAMDFakeTree(t)
+	f.addCard("card1", "0000:04:00.0", apuAttrs(nil))
+
+	gpus := detectAMDGPUs(f.drmRoot)
+	if len(gpus) != 1 {
+		t.Fatalf("detectAMDGPUs = %d rows, want 1", len(gpus))
+	}
+	const driverUsed uint64 = 3 << 30
+	const hostUsed uint64 = 25_500_000_000
+	snap := statsSnapshot{
+		MemUsedBytes: hostUsed,
+		GPU:          map[string]gpuStat{gpus[0].statsKey: {VRAMUsed: driverUsed, UtilizationPct: 12}},
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(buildResponse(gpus, nil, 0, snap, "", nil), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	row := raw["GPUs"].([]any)[0].(map[string]any)
+	if got := row["memory_pool"]; got != noderec.GPUMemoryPoolUnified {
+		t.Errorf("memory_pool = %v, want %q", got, noderec.GPUMemoryPoolUnified)
+	}
+	used, present := row["vram_used_bytes"]
+	if !present {
+		t.Fatalf("vram_used_bytes absent: amdgpu measured %d and the row must carry it", driverUsed)
+	}
+	if got := uint64(used.(float64)); got != driverUsed {
+		t.Errorf("vram_used_bytes = %d, want the driver's %d (the host's is %d)", got, driverUsed, hostUsed)
 	}
 }
 

@@ -121,8 +121,18 @@ func TestFindRKNPUDeviceAndRow(t *testing.T) {
 	if row.statsKey != "rknpu:fdab0000.npu" {
 		t.Errorf("statsKey = %q, want rknpu:fdab0000.npu", row.statsKey)
 	}
-	if !row.usesSystemMemoryUsage || row.VramBytes != memTotal {
-		t.Errorf("unified memory not wired: usesSystemMemoryUsage=%v VramBytes=%d", row.usesSystemMemoryUsage, row.VramBytes)
+	if row.MemoryPool != noderec.GPUMemoryPoolUnified || row.VramBytes != memTotal {
+		t.Errorf("unified pool not wired: MemoryPool=%q VramBytes=%d", row.MemoryPool, row.VramBytes)
+	}
+	// The NPU allocates from a pool it shares with everything else on the SoC
+	// and no driver counter says how much of it the NPU holds. Borrowing the
+	// host's usage is what printed "VRAM 1.1 GB / 8 GB" for an idle NPU, so
+	// the row must carry no used figure at all.
+	if row.usesSystemMemoryUsage {
+		t.Error("usesSystemMemoryUsage set on an RKNPU row: /proc/meminfo counts every process on the board, not the NPU")
+	}
+	if row.VramUsedBytes != 0 {
+		t.Errorf("VramUsedBytes = %d, want 0/absent: nothing measures this device's share of the pool", row.VramUsedBytes)
 	}
 	if noderec.MaxGPUUtilization([]noderec.GPUInfo{{Kind: row.Kind, UtilizationPercent: 100}}) != 0 {
 		t.Error("an NPU row must not contribute to GPU pressure")

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"nvpair-shared/noderec"
 )
 
 // Linux AMD GPU inventory, read straight from the amdgpu driver's sysfs nodes.
@@ -40,11 +42,16 @@ import (
 // (512 MiB on the Ryzen 5 5625U this was measured on) while the real ceiling
 // for a model is that carve-out plus the GTT aperture, so capacity is reported
 // as vram_total + gtt_total for those parts and as vram_total alone for a
-// discrete card. That pool is shared with system RAM, but it is NOT the same
-// thing as GPUInfo.usesSystemMemoryUsage, which substitutes whole-system RAM
-// usage for a GPU whose driver cannot report its own: amdgpu reports its own
-// usage precisely, so unified rows carry their own flag and their used figure
-// stays the driver's (vram_used + gtt_used).
+// discrete card. That pool is shared with system RAM, so an APU row is stamped
+// noderec.GPUMemoryPoolUnified and a client presents it as a shared ceiling
+// rather than as dedicated VRAM.
+//
+// An APU row is nonetheless the one unified row that keeps a used figure, and
+// it is the driver's own: amdgpu measures vram_used + gtt_used for this device
+// specifically. That is a different thing from GPUInfo.usesSystemMemoryUsage,
+// which substitutes whole-host RAM usage and belongs only to the nvidia UMA
+// rows; an AMD row must never set it, or a real per-device measurement would
+// be overwritten by a figure describing every process on the box.
 //
 // Sampling lives in stats_amd_linux.go. Both halves derive their join key and
 // their unified/discrete verdict from listAMDCards, so a row and its samples
@@ -176,8 +183,9 @@ type amdCard struct {
 
 	// unifiedPool marks a row whose capacity is the VRAM carve-out plus the
 	// GTT aperture (an APU) rather than dedicated memory (a discrete card).
-	// Deliberately separate from GPUInfo.usesSystemMemoryUsage: this pool's
-	// usage comes from the driver, not from /proc/meminfo.
+	// It becomes GPUInfo.MemoryPool on the wire. Deliberately separate from
+	// GPUInfo.usesSystemMemoryUsage: this pool's usage comes from the driver,
+	// not from /proc/meminfo.
 	unifiedPool bool
 
 	// statsKey is "amd:<pci address>", the join key between the static row and
@@ -197,11 +205,15 @@ var amdDRMUnreadable sync.Once
 func detectAMDGPUs(drmRoot string) []GPUInfo {
 	var out []GPUInfo
 	for _, c := range listAMDCards(drmRoot) {
-		out = append(out, GPUInfo{
+		row := GPUInfo{
 			Name:      amdModelName(c.deviceID, c.deviceDir),
 			VramBytes: amdCapacityBytes(c),
 			statsKey:  c.statsKey,
-		})
+		}
+		if c.unifiedPool {
+			row.MemoryPool = noderec.GPUMemoryPoolUnified
+		}
+		out = append(out, row)
 	}
 	return out
 }

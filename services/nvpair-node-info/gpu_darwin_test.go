@@ -10,6 +10,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 func TestStaticGPUsFromIORegistry(t *testing.T) {
@@ -30,11 +32,18 @@ func TestStaticGPUsFromIORegistry(t *testing.T) {
 	if apple.VramUsedBytes != 0 || apple.UtilizationPercent != 0 {
 		t.Fatalf("static detection published dynamic fields: %+v", apple)
 	}
+	if apple.MemoryPool != noderec.GPUMemoryPoolUnified {
+		t.Errorf("Apple MemoryPool = %q, want %q: 36 GiB of shared memory is not this GPU's VRAM",
+			apple.MemoryPool, noderec.GPUMemoryPoolUnified)
+	}
 
 	discrete := gpus[1]
 	if discrete.Name != "AMD Radeon Pro" || discrete.VramBytes != 8<<30 ||
 		discrete.statsKey != "ioreg:63" {
 		t.Fatalf("unexpected discrete GPU: %+v", discrete)
+	}
+	if discrete.MemoryPool != "" {
+		t.Errorf("discrete MemoryPool = %q, want empty", discrete.MemoryPool)
 	}
 }
 

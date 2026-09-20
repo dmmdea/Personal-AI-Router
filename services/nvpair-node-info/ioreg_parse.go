@@ -31,10 +31,17 @@ type ioRegistryEntry struct {
 }
 
 type darwinGPURecord struct {
-	statsKey         string
-	name             string
-	vramTotal        uint64
-	vramUsed         uint64
+	statsKey  string
+	name      string
+	vramTotal uint64
+	vramUsed  uint64
+	// unifiedPool marks an Apple Silicon GPU, whose vramTotal is the host's
+	// whole memory because the SoC has one pool. It becomes GPUInfo.MemoryPool
+	// so a client shows that ceiling as shared rather than as dedicated VRAM.
+	// Its vramUsed stays the real figure either way: IOAccelerator measures
+	// what this device allocated, so unlike the sysfs-only unified rows this
+	// one has a used number worth publishing.
+	unifiedPool      bool
 	utilizationPct   uint32
 	utilizationValid bool
 }
@@ -80,6 +87,7 @@ func normalizeIORegistryGPU(entry ioRegistryEntry, name string, systemMemory uin
 	if isApple {
 		record.vramTotal = systemMemory
 		record.vramUsed = entry.Performance.AllocSystemMemory
+		record.unifiedPool = true
 	} else {
 		record.vramTotal = entry.VRAMTotalMB * 1024 * 1024
 		dedicatedUsed := entry.Performance.VRAMUsedBytes

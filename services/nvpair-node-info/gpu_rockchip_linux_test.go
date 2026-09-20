@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"nvpair-shared/noderec"
 )
 
 // writeFile writes one file of a fake sysfs tree, creating its parents.
@@ -160,8 +162,17 @@ func TestFindMaliDeviceAndRow(t *testing.T) {
 	if row.Kind != "" {
 		t.Errorf("Kind = %q, want empty (a Mali is a GPU, not an accelerator)", row.Kind)
 	}
-	if !row.usesSystemMemoryUsage || row.VramBytes != memTotal {
-		t.Errorf("unified memory not wired: usesSystemMemoryUsage=%v VramBytes=%d", row.usesSystemMemoryUsage, row.VramBytes)
+	if row.MemoryPool != noderec.GPUMemoryPoolUnified || row.VramBytes != memTotal {
+		t.Errorf("unified pool not wired: MemoryPool=%q VramBytes=%d", row.MemoryPool, row.VramBytes)
+	}
+	// The capacity is the board's whole RAM, which is honest as a ceiling and
+	// a lie as a usage: the Mali driver publishes no allocation counter, so
+	// the row reports none rather than the host's.
+	if row.usesSystemMemoryUsage {
+		t.Error("usesSystemMemoryUsage set on a Mali row: the host's RAM usage is not the GPU's")
+	}
+	if row.VramUsedBytes != 0 {
+		t.Errorf("VramUsedBytes = %d, want 0/absent", row.VramUsedBytes)
 	}
 
 	if util, ok := dev.readUtilization(); !ok || util != 37 {

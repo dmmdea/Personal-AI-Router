@@ -444,7 +444,27 @@ type GPUInfo struct {
 	// TemperatureCelsius is the device's own thermal readout when the driver
 	// exposes one (accelerators do; GPUs leave it zero and it drops from JSON).
 	TemperatureCelsius uint32 `json:"temperature_celsius,omitempty"`
+	// MemoryPool says where VramBytes comes from. Empty — the historical
+	// default — means the capacity is the device's own dedicated memory.
+	// GPUMemoryPoolUnified means it is a pool the device shares with the host,
+	// so the figure is a ceiling the CPU is also spending from, not memory set
+	// aside for this device.
+	//
+	// It is independent of VramUsedBytes: a unified row carries a used figure
+	// only when its own driver reports one (an AMD APU does, a DGX Spark does),
+	// and omits it otherwise rather than substituting the host's RAM usage.
+	MemoryPool string `json:"memory_pool,omitempty"`
 }
+
+// GPUMemoryPoolUnified marks a GPUInfo row whose VramBytes is a memory pool
+// shared with the host rather than dedicated device memory: an Intel or AMD
+// integrated GPU, an Arm Mali GPU, an RKNPU, a Grace-Blackwell UMA part.
+//
+// A client must not present such a capacity as "VRAM": it is the whole host
+// pool, and the same bytes are the CPU's. Pairing it with the host's RAM usage
+// to produce a "GPU is using N GB" figure is what this constant exists to stop
+// — see VramUsedBytes above for what a unified row may report instead.
+const GPUMemoryPoolUnified = "unified"
 
 // GPUKindAccelerator marks a GPUInfo row that describes a dedicated inference
 // accelerator rather than a GPU: an Edge TPU, an NPU, an M.2 AI module.
