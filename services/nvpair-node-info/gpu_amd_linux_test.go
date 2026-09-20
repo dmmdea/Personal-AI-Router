@@ -92,6 +92,18 @@ func (f *amdFakeTree) addHwmon(deviceDir, hwmon string, files map[string]string)
 	writeAttrs(f.t, dir, files)
 }
 
+// addGCIPVersion creates the amdgpu IP-discovery node that reports the card's
+// Graphics Core IP version, at the path the driver really uses. The measured
+// Barcelo APU reports 9.3.0 there, which is gfx90c.
+func (f *amdFakeTree) addGCIPVersion(deviceDir, major, minor, revision string) {
+	f.t.Helper()
+	dir := filepath.Join(deviceDir, amdGCIPPath)
+	mkdir(f.t, dir)
+	writeAttrs(f.t, dir, map[string]string{
+		"major": major, "minor": minor, "revision": revision,
+	})
+}
+
 func mkdir(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -148,7 +160,7 @@ func TestDetectAMDGPUsAPUCapacityIsVRAMPlusGTT(t *testing.T) {
 	if want := uint64(fakeAPUVRAMTotal + fakeAPUGTTTotal); got.VramBytes != want {
 		t.Errorf("VramBytes = %d, want %d (vram+gtt)", got.VramBytes, want)
 	}
-	if want := "AMD Radeon Graphics (Vega 7, Barcelo)"; got.Name != want {
+	if want := "AMD Radeon Vega Graphics (Barcelo, GCN 5.1)"; got.Name != want {
 		t.Errorf("Name = %q, want %q", got.Name, want)
 	}
 	if want := "amd:0000:04:00.0"; got.statsKey != want {
@@ -181,7 +193,7 @@ func TestDetectAMDGPUsDiscreteCapacityIsVRAMOnly(t *testing.T) {
 	if got, want := gpus[0].VramBytes, uint64(17163091968); got != want {
 		t.Errorf("VramBytes = %d, want %d (vram only)", got, want)
 	}
-	if got, want := gpus[0].Name, "AMD Radeon Graphics (0x73bf)"; got != want {
+	if got, want := gpus[0].Name, "AMD Radeon Graphics (device 0x73bf)"; got != want {
 		t.Errorf("Name = %q, want %q", got, want)
 	}
 }
@@ -207,28 +219,148 @@ func TestDetectAMDGPUsUnlistedAPUIsUnifiedByItsNumbers(t *testing.T) {
 	}
 }
 
-// TestAMDModelName pins every table entry and both fallbacks. The fallback
-// exists so an unknown card is still published under a name a user recognizes
-// as their GPU - never a bare codename, never a dropped row.
+// TestAMDModelName pins every table entry and both fallbacks. Each name
+// carries the graphics generation, because that is the question a node list
+// has to answer ("Barcelo" alone says nothing about what the part can run),
+// and each was checked against the kernel's amdgpu PCI table, pci.ids and
+// libdrm's amdgpu.ids rather than recalled. The fallback exists so an unknown
+// card is still published under a name a user recognizes as their GPU - never
+// a bare codename, never a dropped row.
 func TestAMDModelName(t *testing.T) {
 	cases := []struct{ id, want string }{
-		{"15e7", "AMD Radeon Graphics (Vega 7, Barcelo)"},
-		{"1638", "AMD Radeon Graphics (Cezanne)"},
-		{"164c", "AMD Radeon Graphics (Lucienne)"},
-		{"1636", "AMD Radeon Graphics (Renoir)"},
-		{"15d8", "AMD Radeon Graphics (Picasso)"},
-		{"15dd", "AMD Radeon Graphics (Raven)"},
-		{"1681", "AMD Radeon Graphics (Rembrandt)"},
-		{"15bf", "AMD Radeon Graphics (Phoenix)"},
-		{"15c8", "AMD Radeon Graphics (Phoenix2)"},
-		{"150e", "AMD Radeon Graphics (Strix)"},
-		{"7480", "AMD Radeon Graphics (0x7480)"},
+		{"15dd", "AMD Radeon Vega Graphics (Raven Ridge, GCN 5)"},
+		{"15d8", "AMD Radeon Vega Graphics (Picasso, GCN 5)"},
+		{"1636", "AMD Radeon Vega Graphics (Renoir, GCN 5.1)"},
+		{"164c", "AMD Radeon Vega Graphics (Lucienne, GCN 5.1)"},
+		{"1638", "AMD Radeon Vega Graphics (Cezanne, GCN 5.1)"},
+		{"15e7", "AMD Radeon Vega Graphics (Barcelo, GCN 5.1)"},
+		{"164e", "AMD Radeon Graphics (Raphael, RDNA 2)"},
+		{"1681", "AMD Radeon 680M (Rembrandt, RDNA 2)"},
+		{"15bf", "AMD Radeon 780M (Phoenix, RDNA 3)"},
+		{"15c8", "AMD Radeon 740M (Phoenix2, RDNA 3)"},
+		{"1900", "AMD Radeon 780M (Hawk Point, RDNA 3)"},
+		{"150e", "AMD Radeon 890M (Strix Point, RDNA 3.5)"},
+		{"1586", "AMD Radeon 8060S (Strix Halo, RDNA 3.5)"},
+		{"1114", "AMD Radeon 860M (Krackan Point, RDNA 3.5)"},
+		{"7480", "AMD Radeon Graphics (device 0x7480)"},
 		{"", "AMD Radeon Graphics"},
 	}
 	for _, c := range cases {
-		if got := amdModelName(c.id); got != c.want {
+		// No device directory: the table and the bare fallback are the only
+		// sources, which is the case on every host with no IP-discovery node.
+		if got := amdModelName(c.id, ""); got != c.want {
 			t.Errorf("amdModelName(%q) = %q, want %q", c.id, got, c.want)
 		}
+	}
+}
+
+// TestAMDModelNameNamesTheGenerationAndNeverTheCoreCount is the rule the table
+// exists to enforce. The compute-unit count is NOT derivable from the device
+// id - 0x15e7 alone ships as Vega 6, Vega 7 and Vega 8, separated only by the
+// PCI revision id - so printing one is a guess that is wrong on most SKUs. The
+// generation is derivable, and is what the operator asked to see.
+func TestAMDModelNameNamesTheGenerationAndNeverTheCoreCount(t *testing.T) {
+	architectures := []string{"GCN 5", "GCN 5.1", "RDNA 2", "RDNA 3", "RDNA 3.5"}
+	for id, model := range amdModels {
+		name := amdModelName(id, "")
+		named := false
+		for _, arch := range architectures {
+			if strings.HasSuffix(name, ", "+arch+")") {
+				named = true
+				break
+			}
+		}
+		if !named {
+			t.Errorf("amdModels[%q] = %q; every name must end in a known architecture %v", id, name, architectures)
+		}
+		if !strings.Contains(name, " (") {
+			t.Errorf("amdModels[%q] = %q; want the \"<name> (<codename>, <architecture>)\" shape", id, name)
+		}
+		// "Vega 7" and friends are core counts, not generations. "Vega
+		// Graphics" (no digit) is the marketing name AMD itself uses for the
+		// whole family and is allowed.
+		for _, banned := range []string{"Vega 3", "Vega 6", "Vega 7", "Vega 8", "Vega 10", "Vega 11", " CU", "cores"} {
+			if strings.Contains(name, banned) {
+				t.Errorf("amdModels[%q] = %q contains %q: a compute-unit count cannot be derived from a device id", id, name, banned)
+			}
+		}
+		if !model.apu {
+			t.Errorf("amdModels[%q] is not marked apu; every listed part is an integrated GPU", id)
+		}
+	}
+}
+
+// TestAMDModelNameFallbackDerivesArchitectureFromGCIP covers a part released
+// after amdModels was written. amdgpu publishes the ASIC's own Graphics Core
+// IP version in sysfs, so the generation is still knowable even when the name
+// is not - and a row reading "(device 0x1234, RDNA 3.5)" is useful on day one,
+// where a bare id is not.
+func TestAMDModelNameFallbackDerivesArchitectureFromGCIP(t *testing.T) {
+	cases := []struct {
+		name                   string
+		major, minor, revision string
+		want                   string
+	}{
+		{"Renoir-class gfx90c", "9", "3", "0", "AMD Radeon Graphics (device 0x1234, GCN 5.1)"},
+		{"Vega", "9", "1", "0", "AMD Radeon Graphics (device 0x1234, GCN 5)"},
+		{"RDNA", "10", "1", "10", "AMD Radeon Graphics (device 0x1234, RDNA)"},
+		{"RDNA 2", "10", "3", "1", "AMD Radeon Graphics (device 0x1234, RDNA 2)"},
+		{"RDNA 3", "11", "0", "4", "AMD Radeon Graphics (device 0x1234, RDNA 3)"},
+		{"RDNA 3.5", "11", "5", "0", "AMD Radeon Graphics (device 0x1234, RDNA 3.5)"},
+		{"RDNA 4", "12", "0", "1", "AMD Radeon Graphics (device 0x1234, RDNA 4)"},
+		// 9.4.x is the data-center CDNA line, not GCN 5.4. Naming it from the
+		// "9.x is GCN 5.x" shorthand would be wrong, so the architecture is
+		// dropped instead of invented.
+		{"unmapped CDNA", "9", "4", "3", "AMD Radeon Graphics (device 0x1234)"},
+		{"unmapped future", "13", "0", "0", "AMD Radeon Graphics (device 0x1234)"},
+		{"unparseable", "N/A", "", "", "AMD Radeon Graphics (device 0x1234)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newAMDFakeTree(t)
+			dev := f.addCard("card1", "0000:04:00.0", map[string]string{
+				"vendor": "0x1002", "device": "0x1234",
+			})
+			f.addGCIPVersion(dev, c.major, c.minor, c.revision)
+
+			if got := amdModelName("1234", dev); got != c.want {
+				t.Errorf("amdModelName = %q, want %q", got, c.want)
+			}
+			gpus := detectAMDGPUs(f.drmRoot)
+			if len(gpus) != 1 {
+				t.Fatalf("detectAMDGPUs = %d rows, want 1", len(gpus))
+			}
+			if gpus[0].Name != c.want {
+				t.Errorf("row Name = %q, want %q (the detector must use the same name)", gpus[0].Name, c.want)
+			}
+		})
+	}
+}
+
+// TestAMDModelNameFallbackWithoutGCIP: every pre-Renoir part has no
+// ip_discovery tree at all, and a missing tree must not be an error - it just
+// leaves the architecture out.
+func TestAMDModelNameFallbackWithoutGCIP(t *testing.T) {
+	f := newAMDFakeTree(t)
+	dev := f.addCard("card1", "0000:04:00.0", map[string]string{
+		"vendor": "0x1002", "device": "0x1234",
+	})
+	if got, want := amdModelName("1234", dev), "AMD Radeon Graphics (device 0x1234)"; got != want {
+		t.Errorf("amdModelName = %q, want %q", got, want)
+	}
+}
+
+// TestAMDGCArchitectureIsNotConsultedForAListedPart: the table is
+// authoritative. A listed id keeps its verified name even if the card's IP
+// version maps elsewhere, so the published name never depends on which of two
+// sources happened to be readable.
+func TestAMDGCArchitectureIsNotConsultedForAListedPart(t *testing.T) {
+	f := newAMDFakeTree(t)
+	dev := f.addCard("card1", "0000:04:00.0", apuAttrs(nil))
+	f.addGCIPVersion(dev, "12", "0", "0") // RDNA 4, which a Barcelo is not
+
+	if got, want := amdModelName("15e7", dev), "AMD Radeon Vega Graphics (Barcelo, GCN 5.1)"; got != want {
+		t.Errorf("amdModelName = %q, want %q", got, want)
 	}
 }
 
