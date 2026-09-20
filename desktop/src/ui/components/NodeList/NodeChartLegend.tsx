@@ -4,6 +4,7 @@
 import { memo } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { CpuFallbackInfo, GpuInfo } from '@/ui/types/node-hardware'
+import { showsUsage, showsVram } from '@/ui/utils/hardware-rows'
 
 const dotSize = '10px'
 
@@ -65,18 +66,24 @@ function NodeChartLegend({
             {gpuInfo.map(gpu => (
                 <Stack key={gpu.id} gap="1">
                     <Text kind="body/semibold/sm">{gpu.name}</Text>
-                    <Flex align="center" gap="2">
-                        <ColorDot color={gpu.usageColor} />
+                    {/* The motherboard controller reports no busy figure at
+                        all, so it gets no Usage line rather than a "0%" that
+                        would read as idle. */}
+                    {showsUsage(gpu) && (
                         <Flex align="center" gap="2">
-                            <Text kind="body/regular/sm" className="text-subtle-color">
-                                Usage
-                            </Text>
-                            <Text kind="body/semibold/sm">{gpu.usage}%</Text>
+                            <ColorDot color={gpu.usageColor} />
+                            <Flex align="center" gap="2">
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    Usage
+                                </Text>
+                                <Text kind="body/semibold/sm">{gpu.usage}%</Text>
+                            </Flex>
                         </Flex>
-                    </Flex>
-                    {/* An accelerator (Edge TPU / NPU) has no VRAM figure; the row
-                        would only ever read "0 B / 0 B". */}
-                    {!(gpu.kind === 'npu' && gpu.vramTotal === 0) && (
+                    )}
+                    {/* An accelerator (Edge TPU / NPU) and the motherboard
+                        controller have no VRAM figure; the row would only ever
+                        read "0 B / 0 B". */}
+                    {showsVram(gpu) && (
                         <Flex align="center" gap="2">
                             <ColorDot color={gpu.vramColor} />
                             <Text kind="body/regular/sm" className="text-subtle-color">

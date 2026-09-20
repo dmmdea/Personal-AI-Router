@@ -80,10 +80,10 @@ func systemRockchipRoots() rockchipRoots {
 	}
 }
 
-// rockchipMemTotal caches the system-memory total shared by every unified-memory
+// systemMemTotal caches the system-memory total shared by every unified-memory
 // row on this host. Both detectors need it and neither should pay for a second
 // ghw introspection.
-var rockchipMemTotal = sync.OnceValue(detectMemoryTotal)
+var systemMemTotal = sync.OnceValue(detectMemoryTotal)
 
 // maliDevice is the Mali GPU as found in sysfs: a display name, the devfreq
 // node name that becomes its statsKey, and the files its sampler reads.
@@ -121,7 +121,7 @@ func detectRockchipGPUs() []GPUInfo {
 	if !ok {
 		return nil
 	}
-	row := maliRow(dev, rockchipMemTotal())
+	row := maliRow(dev, systemMemTotal())
 	slog.Debug("Mali GPU detected",
 		"name", row.Name, "stats_key", row.statsKey,
 		"load", dev.loadPath, "utilisation", dev.utilPath, "thermal", dev.tempPath)

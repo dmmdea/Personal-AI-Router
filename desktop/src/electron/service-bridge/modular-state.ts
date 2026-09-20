@@ -204,7 +204,10 @@ interface ModularGpu {
     utilizationPercent: number
     // Whole degrees Celsius; 0 when the node reports none.
     temperatureCelsius: number
-    // "npu" for an accelerator row (Edge TPU / NPU); "" for a GPU.
+    // "" for a GPU, "npu" for an accelerator row (Edge TPU / NPU), "board"
+    // for the host's motherboard controller. Carried through untouched: the
+    // kinds are node-info's to define, and a row this build has not heard of
+    // must still reach the UI.
     kind: string
 }
 

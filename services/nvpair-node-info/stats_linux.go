@@ -170,6 +170,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	applyGPUStats(previous, snap, gpu, sampledAt)
 	c.mergeAccelStats(snap)
 	mergeRockchipStats(snap)
+	mergeIntelStats(snap)
 	return snap
 }
 

@@ -93,7 +93,7 @@ func detectRockchipNPU() []GPUInfo {
 	if !ok {
 		return nil
 	}
-	row := rknpuRow(dev, dev.cores(), rockchipMemTotal())
+	row := rknpuRow(dev, dev.cores(), systemMemTotal())
 	slog.Debug("RKNPU detected",
 		"name", row.Name, "stats_key", row.statsKey,
 		"compatible", dev.compatible, "load", dev.loadPath, "thermal", dev.tempPath)
