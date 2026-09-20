@@ -64,6 +64,11 @@ Returns the merged static identity (collected once at startup) and the latest dy
       "utilization_percent": 30,
       "kind": "npu",
       "temperature_celsius": 52
+    },
+    {
+      "name": "ROG Dual Intelligent Processors",
+      "kind": "board",
+      "temperature_celsius": 30
     }
   ],
   "telemetryValid": true,
@@ -90,7 +95,8 @@ Field notes:
 - `clusterUuid` is the cluster principal this node currently holds. It has three distinct states on the wire: **absent** means unknown, **present and empty** means this node belongs to no cluster, and a value is that principal. A consumer must not read absent as unclustered — that is how a node too old to report the field answers, and also how this node answers before its parent has told it anything, so acting on it would clear a correct annotation elsewhere in the fleet.
 - Under the broker, `clusterUuid` is pushed in over stdin (`nodeinfo:set-cluster-identity`) because node-info is spawned with no cluster dir and so cannot read membership itself; the field stays absent until the first push arrives. Standalone with `--cluster-dir`, it reads membership from the trust store per request instead and is therefore always known. The two sources are mutually exclusive by deployment, not a fallback chain.
 - `clusterUuid` exists so a peer can learn this node's membership without its mDNS record. Membership otherwise travels only as the `cluster-uuid=` TXT key, which a consumer reads once per record *change*; a consumer that misses that change keeps the previous value indefinitely, and one still holding a departed node's principal will suppress the invite that would bring it back.
-- `kind` is absent for a GPU and `"npu"` for a dedicated inference accelerator (an Edge TPU / NPU) that is listed in the same `GPUs` inventory so every client shows it. Accelerators cannot run the engines PAIR schedules, so consumers derive a node's GPU pressure with `noderec.MaxGPUUtilization`, which skips `kind:"npu"` rows, and an accelerator never contributes to `telemetryValid` / `msSince`.
+- `kind` is absent for a GPU, `"npu"` for a dedicated inference accelerator (an Edge TPU / NPU), and `"board"` for the host's motherboard controller. All of them are listed in the same `GPUs` inventory so every client shows them, and none of them can run the engines PAIR schedules — so consumers derive a node's GPU pressure with `noderec.MaxGPUUtilization`, which counts **only** rows with an empty `kind`, and no such row contributes to `telemetryValid` / `msSince`. The rule is "GPUs only" rather than a list of the kinds that existed when it was written, so a kind added later is skipped without anyone having to remember.
+- A `kind:"board"` row carries a name and a `temperature_celsius`, and nothing else. See **Windows motherboard controller** below for why there is no `utilization_percent` on it and why that is not an omission to fix.
 - `temperature_celsius` is a device's thermal readout in whole degrees: on a GPU row from `nvidia-smi` (`temperature.gpu`, Linux and Windows; joined to the adapter by PCI address on Windows), on an accelerator row from its driver, and on `cpu` the package temperature from Linux hwmon (`coretemp` "Package id 0" / `k10temp` Tctl, else the `x86_pkg_temp` thermal zone). On Windows the package sensor is a ring-0 register, so the reading comes from the elevated `nvpair-sensors` service over `\\.\pipe\nvpair-sensors` (see `../nvpair-sensors/README.md`); a host without that service, without PawnIO, or with a stale report omits it. Every temperature field is omitted wherever it cannot be read.
 - All dynamic fields and the `cpu` / `memory` objects use `omitempty`: a value the service couldn't read is dropped from the JSON entirely rather than reported as a misleading literal zero. A genuinely idle CPU renders the same as "unknown" — that ambiguity is intentional and benign.
 - `vram_bytes` is reported through DXGI on Windows, `nvidia-smi` on Linux, and IORegistry on macOS. On a unified-memory NVIDIA GPU such as DGX Spark, Linux uses total physical system memory for `vram_bytes` and the independently sampled system-memory usage for `vram_used_bytes`. On Apple Silicon, `vram_bytes` is total physical unified memory and `vram_used_bytes` is the GPU driver's mapped allocation (`Alloc system memory`), not whole-system RAM usage or the momentarily active subset.
@@ -216,6 +222,55 @@ Only `card<N>` directories are enumerated, for the same reason as the AMD path �
 GOOS=linux go test -c -o intel.test
 NVPAIR_LIVE_INTEL=1 ./intel.test -test.v -test.run Live
 ```
+
+- **Windows** (first-class): GPU inventory comes from DXGI (vendor-agnostic, includes VRAM). Dynamic CPU / VRAM-used / utilization / memory-used numbers come from a persistent PDH query plus `GlobalMemoryStatusEx`. GPU temperature comes from `nvidia-smi` on a 5 s poller, joined to each DXGI adapter through the display driver's PCI address (`D3DKMTQueryAdapterInfo` / `KMTQAITYPE_ADAPTERADDRESS`), so two identical cards never swap readings; a host without `nvidia-smi` reports none. The CPU package temperature is polled every 5 s from the `nvpair-sensors` service's named pipe (`nvpair-shared/hostsensors`): the sensor is a model-specific register that only the elevated helper can read through PawnIO. A report older than 30 s is dropped, an absent helper is retried every 30 s, and in both cases `cpu.temperature_celsius` is omitted. Hailo inference accelerators are listed with `kind:"npu"` and a temperature; see **Windows Hailo (HailoRT)** below. The same helper also reads the motherboard's Super I/O sensors, which produce a `kind:"board"` row; see **Windows motherboard controller** below.
+- **Linux** (first-class): NVIDIA GPU inventory, dedicated VRAM usage, utilization and temperature come from `nvidia-smi`; CPU and system-memory usage come from `/proc`, the CPU package temperature from hwmon (`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`, else the `x86_pkg_temp` thermal zone). Unified-memory GPUs use the `/proc/meminfo` system-memory snapshot even when dynamic `nvidia-smi` collection is unavailable. Non-NVIDIA adapters fall back to names from `ghw` without dynamic GPU stats. Inference accelerators behind the gasket/apex driver (Google Coral Edge TPU, `/sys/class/apex/*`) are listed with `kind:"npu"`; the driver keeps no busy counter, so `utilization_percent` is the fraction of 100 ms sub-intervals in the last second in which the device's `interrupt_counts` moved (the same "percent of time working" definition as `nvidia-smi`'s `utilization.gpu`, at coarser resolution), and `temperature_celsius` comes from its `temp` attribute.
+- **macOS**: CPU and system-memory usage come from Mach through gopsutil's purego bindings. GPU identity, mapped memory, and utilization come from the built-in, unprivileged `/usr/sbin/ioreg` command's `IOAccelerator` `PerformanceStatistics`; no sudo or private framework binding is required. Apple Silicon is supported directly. Intel/AMD fields are best-effort when their drivers expose the same dedicated-memory counters. The performance keys are undocumented and may change across macOS releases; a missing or changed key leaves only that metric out and does not stop CPU or memory collection.
+- **Other platforms**: GPU names come from `ghw`; VRAM and dynamic stats are not reported.
+
+### Windows motherboard controller
+
+ASUS fits its boards with two small microcontrollers it markets together as
+Dual Intelligent Processors 5: the **TPU** (TurboV Processing Unit), which
+drives clocks and voltages, and the **EPU** (Energy Processing Unit), which
+manages power. They are as much a part of what a node is made of as an
+accelerator card, so the inventory lists them as a single `kind:"board"` row.
+
+**The ceiling, stated plainly: neither controller publishes any status,
+load or telemetry interface on Windows.** Measured on an ASUS ROG STRIX
+X299-E GAMING II (BIOS 2103, i9-10980XE) with Armoury Crate installed: the
+board's `root\wmi` namespace carries `ASUSHW` (whose methods are raw
+`read/write_smbus_{byte,word,block}` transfers), `ASUSManagement` (display and
+EC event control) and `AsusWpbtWmi`. The `sensor_get_*` methods the Ryzen-era
+ASUS boards answer do not exist on X299, and installing the vendor suite does
+not add them.
+
+So the row is **presence plus the sensors those controllers act on**, and
+nothing is invented to fill the gap:
+
+- **Presence** comes from SMBIOS: the row appears only when the baseboard
+  manufacturer is ASUSTeK *and* the `nvpair-sensors` helper found a Super I/O
+  chip it can read. The name is `ROG Dual Intelligent Processors` when the
+  baseboard product is a ROG board, otherwise `ASUS Dual Intelligent
+  Processors`. The board model, the Super I/O part and the TPU/EPU expansion
+  are logged once at detection rather than crammed into the row's name.
+- **`temperature_celsius`** is refreshed every 5 s from the helper's report: the
+  VRM / probe-header reading when one is available, else the motherboard's own
+  sensor (`SYSTIN`). A report older than 30 s is dropped rather than repeated.
+- **There is no `utilization_percent`, ever.** A literal `0` would render as
+  "idle", which is a claim, and a false one. The desktop hides the Usage and
+  VRAM lines for this row for the same reason.
+
+The row is published by the helper's report rather than by startup detection,
+because the helper is a separate service that may well start after this one;
+it would otherwise be missing on exactly the hosts that reboot together. Once
+published it stays: a motherboard does not leave, so an unreachable helper
+costs the row its temperature, never its place in the inventory.
+
+A non-ASUS board, a board whose Super I/O chip the helper does not decode, and
+a host without the helper all produce no row at all rather than a generic one.
+What the helper reads, which chips it supports, and why no input claims to be
+the VRM are in `../nvpair-sensors/README.md`.
 
 ### Windows Hailo (HailoRT)
 

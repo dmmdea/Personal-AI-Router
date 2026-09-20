@@ -232,6 +232,11 @@ type statsCollector struct {
 	// (cputemp_windows.go); each tick publishes its latest package reading.
 	cpuTemp *cpuTempPoller
 
+	// board holds the motherboard controller row and its temperature
+	// (board_windows.go). It is fed by cpuTemp's reports rather than
+	// polling on its own; nil is impossible, but every method tolerates it.
+	board *boardPoller
+
 	// accels are the per-device inference-accelerator samplers
 	// (accel_windows.go), one goroutine each on their own slow cadence; the
 	// tick only folds their latest published sample into the snapshot. Nil on
@@ -285,7 +290,8 @@ func startStatsCollector() *statsCollector {
 	}
 
 	c.gpuTemps = startGPUTempPoller()
-	c.cpuTemp = startCPUTempPoller()
+	c.board = newBoardPoller(time.Now)
+	c.cpuTemp = startCPUTempPoller(c.board.observe)
 	c.accels = startHailoSamplers()
 	c.wg.Add(1)
 	go c.run()
@@ -495,6 +501,9 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	snap.CPUTempC = c.cpuTemp.current()
 	// Accelerator rows carry only a temperature, under their own statsKey.
 	c.mergeAccelStats(snap)
+	// The motherboard controller row does the same, from the report the CPU
+	// temperature poller already fetched.
+	c.mergeBoardStats(snap)
 
 	if used, ok := readMemoryUsed(); ok {
 		snap.MemUsedBytes = used
@@ -523,6 +532,25 @@ func (c *statsCollector) mergeAccelStats(snap *statsSnapshot) {
 			merged[a.key] = st
 		}
 	}
+	snap.GPU = merged
+}
+
+// mergeBoardStats adds the motherboard controller's temperature to the
+// snapshot under its statsKey. Like mergeAccelStats it runs after
+// applyGPUStats and clones before writing, so the previous, already-published
+// map is never mutated, and it leaves GPUSampledAt alone: a board sensor is
+// not GPU telemetry and must not make a GPU-less host look like it has fresh
+// GPU telemetry.
+func (c *statsCollector) mergeBoardStats(snap *statsSnapshot) {
+	st, ok := c.board.Latest()
+	if !ok {
+		return
+	}
+	merged := make(map[string]gpuStat, len(snap.GPU)+1)
+	for k, v := range snap.GPU {
+		merged[k] = v
+	}
+	merged[boardStatsKey] = st
 	snap.GPU = merged
 }
 
@@ -710,6 +738,18 @@ func (c *statsCollector) Snapshot() statsSnapshot {
 	}
 	if inventory := c.gpuInventory.Load(); inventory != nil {
 		snap.GPUInventory = *inventory
+	}
+	// The board row joins the inventory the same way a recovered adapter
+	// does, rather than through startup detection: the helper it is
+	// described by is a separate service that may well come up after this
+	// one, and a row that only ever appeared if the race went the right way
+	// would be missing on exactly the hosts that reboot together. Appended
+	// to a copy, because the stored inventory slice is shared with every
+	// other reader of this snapshot.
+	if row, ok := c.board.Row(); ok {
+		withBoard := make([]GPUInfo, len(snap.GPUInventory), len(snap.GPUInventory)+1)
+		copy(withBoard, snap.GPUInventory)
+		snap.GPUInventory = append(withBoard, row)
 	}
 	return snap
 }

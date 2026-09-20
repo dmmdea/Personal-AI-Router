@@ -137,12 +137,16 @@ func (p *pawnIO) call(name string, in []uint64, outLen int) ([]uint64, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The driver is always handed a real output cell: &out[0] needs a
-	// non-empty slice even for a function that writes nothing back.
-	if outLen < 1 {
-		outLen = 1
+	// A function that writes nothing back is called with a null output
+	// buffer of length zero, which is what the module's own declaration
+	// says it takes; handing it a cell it never fills would leave the
+	// caller reading uninitialised memory back.
+	var out []uint64
+	var outPtr unsafe.Pointer
+	if outLen > 0 {
+		out = make([]uint64, outLen)
+		outPtr = unsafe.Pointer(&out[0])
 	}
-	out := make([]uint64, outLen)
 	var inPtr unsafe.Pointer
 	if len(in) > 0 {
 		inPtr = unsafe.Pointer(&in[0])
@@ -153,14 +157,14 @@ func (p *pawnIO) call(name string, in []uint64, outLen int) ([]uint64, error) {
 		uintptr(unsafe.Pointer(cname)),
 		uintptr(inPtr),
 		uintptr(len(in)),
-		uintptr(unsafe.Pointer(&out[0])),
+		uintptr(outPtr),
 		uintptr(outLen),
 		uintptr(unsafe.Pointer(&returned)),
 	)
 	if err := hresult("pawnio_execute("+name+")", r); err != nil {
 		return nil, err
 	}
-	if int(returned) < outLen {
+	if int(returned) < len(out) {
 		out = out[:returned]
 	}
 	return out, nil

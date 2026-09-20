@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"nvpair-shared/hostsensors"
 )
 
 // fakeSensor scripts read results; each read consumes the next entry and the
@@ -197,5 +199,201 @@ func TestSamplerStopClosesSensor(t *testing.T) {
 	}
 	if !fs.closed {
 		t.Fatal("Stop must close the sensor")
+	}
+}
+
+// fakeBoard scripts board read results the same way fakeSensor scripts CPU
+// ones; the last entry repeats.
+type fakeBoard struct {
+	script []boardResult
+	reads  int
+	note   string
+	closed bool
+}
+
+type boardResult struct {
+	reading hostsensors.BoardReading
+	err     error
+}
+
+func (f *fakeBoard) read() (hostsensors.BoardReading, error) {
+	i := f.reads
+	if i >= len(f.script) {
+		i = len(f.script) - 1
+	}
+	f.reads++
+	return f.script[i].reading, f.script[i].err
+}
+
+func (f *fakeBoard) openNote() string { return f.note }
+
+func (f *fakeBoard) close() { f.closed = true }
+
+// boardOpener hands out board sensors from a queue; an empty queue fails.
+type boardOpener struct {
+	queue   []*fakeBoard
+	opens   int
+	failErr error
+}
+
+func (o *boardOpener) open() (boardSensor, error) {
+	o.opens++
+	if len(o.queue) == 0 {
+		return nil, o.failErr
+	}
+	b := o.queue[0]
+	o.queue = o.queue[1:]
+	return b, nil
+}
+
+func nuvotonReading() hostsensors.BoardReading {
+	return hostsensors.BoardReading{
+		Chip:    "Nuvoton NCT6798D",
+		ChipID:  "0xD4/0x2B",
+		Vendor:  "ASUSTeK COMPUTER INC.",
+		Product: "ROG STRIX X299-E GAMING II",
+		Temperatures: []hostsensors.BoardTemp{
+			{Label: "CPU socket", Input: "CPUTIN", Role: hostsensors.RoleCPUSocket, Celsius: 40},
+			{Label: "Motherboard", Input: "SYSTIN", Role: hostsensors.RoleMotherboard, Celsius: 30.5},
+		},
+		Fans:       []hostsensors.BoardFan{{Index: 0, Label: "Fan 1", RPM: 1100}},
+		VcoreVolts: 1.12,
+		Source:     sourceSuperIO,
+	}
+}
+
+// TestSamplerTickPublishesTheBoardBesideTheCPU: both sections land in one
+// report and the board reading is stamped by the sampler, not by the sensor.
+func TestSamplerTickPublishesTheBoardBesideTheCPU(t *testing.T) {
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	o := &opener{queue: []*fakeSensor{{script: []readResult{{c: 58}}}}}
+	bo := &boardOpener{queue: []*fakeBoard{{script: []boardResult{{reading: nuvotonReading()}}}}}
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return now })
+	s.openBoard = bo.open
+	st := &samplerState{}
+
+	if d := s.tick(st); d != tickInterval {
+		t.Fatalf("delay = %s, want %s", d, tickInterval)
+	}
+	r := s.report()
+	if r.CPU == nil || r.CPU.PackageCelsius != 58 {
+		t.Fatalf("cpu = %+v", r.CPU)
+	}
+	if r.Board == nil {
+		t.Fatal("the report carries no board section")
+	}
+	if r.Board.Chip != "Nuvoton NCT6798D" || r.Board.Product != "ROG STRIX X299-E GAMING II" {
+		t.Fatalf("board = %+v", r.Board)
+	}
+	if !r.Board.SampledAt.Equal(now.UTC()) {
+		t.Fatalf("board sampled_at = %s, want %s", r.Board.SampledAt, now.UTC())
+	}
+	if r.Error != "" {
+		t.Fatalf("error = %q, want empty", r.Error)
+	}
+}
+
+// TestSamplerTickKeepsEachSensorsFailureToItself: the two sensors fail apart.
+// A host with no supported Super I/O chip must still publish its CPU
+// temperature, and a host whose CPU sensor is gone must still publish its
+// board sensors — the regression this separation exists to prevent.
+func TestSamplerTickKeepsEachSensorsFailureToItself(t *testing.T) {
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+
+	t.Run("no board chip", func(t *testing.T) {
+		o := &opener{queue: []*fakeSensor{{script: []readResult{{c: 58}}}}}
+		bo := &boardOpener{failErr: errors.New("no supported Super I/O chip")}
+		s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return now })
+		s.openBoard = bo.open
+		s.tick(&samplerState{})
+
+		r := s.report()
+		if r.CPU == nil || r.CPU.PackageCelsius != 58 {
+			t.Fatalf("an unsupported board cost the CPU reading: %+v", r)
+		}
+		if r.Board != nil {
+			t.Fatalf("board = %+v, want nil", r.Board)
+		}
+		if r.Error != "" {
+			t.Fatalf("error = %q: an absent board section is not a CPU fault", r.Error)
+		}
+	})
+
+	t.Run("no CPU sensor", func(t *testing.T) {
+		o := &opener{failErr: errors.New("PawnIO is not installed")}
+		bo := &boardOpener{queue: []*fakeBoard{{script: []boardResult{{reading: nuvotonReading()}}}}}
+		s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return now })
+		s.openBoard = bo.open
+		s.tick(&samplerState{})
+
+		r := s.report()
+		if r.CPU != nil {
+			t.Fatalf("cpu = %+v, want nil", r.CPU)
+		}
+		if r.Error != "PawnIO is not installed" {
+			t.Fatalf("error = %q", r.Error)
+		}
+		if r.Board == nil {
+			t.Fatal("a missing CPU sensor took the board section down with it")
+		}
+	})
+}
+
+// TestSamplerTickReopensTheBoardAfterRepeatedFailures and holds off on the
+// retry cadence rather than reopening on every tick.
+func TestSamplerTickReopensTheBoardAfterRepeatedFailures(t *testing.T) {
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	clock := now
+	failing := &fakeBoard{script: []boardResult{{err: errors.New("the module stopped answering")}}}
+	healthy := &fakeBoard{script: []boardResult{{reading: nuvotonReading()}}}
+	o := &opener{queue: []*fakeSensor{{script: []readResult{{c: 58}}}}}
+	bo := &boardOpener{queue: []*fakeBoard{failing, healthy}}
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return clock })
+	s.openBoard = bo.open
+	st := &samplerState{}
+
+	for i := 0; i < sensorReopenAfterFailures; i++ {
+		s.tick(st)
+		if r := s.report(); r.Board != nil {
+			t.Fatalf("tick %d published a board section from a failing sensor", i)
+		}
+	}
+	if !failing.closed {
+		t.Fatal("the failing board sensor was not closed after its failure streak")
+	}
+	if bo.opens != 1 {
+		t.Fatalf("opens = %d, want 1 so far", bo.opens)
+	}
+
+	// Still inside the retry window: no second open attempt.
+	clock = now.Add(tickRetry / 2)
+	s.tick(st)
+	if bo.opens != 1 {
+		t.Fatalf("opens = %d during the retry hold-off, want 1", bo.opens)
+	}
+
+	clock = now.Add(tickRetry + time.Second)
+	s.tick(st)
+	if bo.opens != 2 {
+		t.Fatalf("opens = %d after the retry window, want 2", bo.opens)
+	}
+	if r := s.report(); r.Board == nil || r.Board.Chip != "Nuvoton NCT6798D" {
+		t.Fatalf("board = %+v after a successful reopen", r.Board)
+	}
+}
+
+// TestSamplerStopClosesBoardSensor: the board handle is released on shutdown
+// alongside the CPU one.
+func TestSamplerStopClosesBoardSensor(t *testing.T) {
+	b := &fakeBoard{script: []boardResult{{reading: nuvotonReading()}}}
+	o := &opener{queue: []*fakeSensor{{script: []readResult{{c: 58}}}}}
+	bo := &boardOpener{queue: []*fakeBoard{b}}
+	s := startSampler(time.Hour, quietLog(), o.open, bo.open)
+	for i := 0; i < 100 && b.reads == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	s.Stop()
+	if !b.closed {
+		t.Fatal("Stop did not close the board sensor")
 	}
 }
