@@ -123,248 +123,275 @@ export default function NodePerformance({
     }, [node, nodeMetrics])
 
     return (
-        <Flex
-            className={`w-full min-w-0 flex-nowrap max-[1000px]:flex-wrap ${className ? className : ''}`}
-            align="stretch"
-            gap="2"
-        >
-            {/* Chart Section (placeholder when no metrics) */}
-            <div className="grow min-w-0 overflow-hidden min-h-[200px] relative">
-                <SvgLineChart
-                    datasets={datasets}
-                    maxDataPoints={30}
-                    yAxisMax={100}
-                    selectedKey={selectedMetric}
-                />
-                {!nodeMetrics && (
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <Text kind="body/regular/sm" className="text-subtle-color">
-                            No metrics yet
-                        </Text>
-                    </div>
-                )}
-            </div>
-
-            {/* Custom Legend / Hardware Info Section */}
-            <Stack gap="4" className="shrink-0 w-50 ml-2 self-center">
-                {/* GPU Metrics */}
-                {hardwareInfo.gpus.map(gpu => {
-                    // Check if this GPU's metrics are selected
-                    const isGpuSelected =
-                        selectedMetric === undefined ||
-                        selectedMetric === `gpu-${gpu.id}` ||
-                        selectedMetric === `vram-${gpu.id}`
-
-                    return (
-                        <Stack gap="0" key={gpu.id}>
-                            <Text
-                                kind="body/semibold/sm"
-                                className="transition-opacity text-nowrap text-ellipsis overflow-hidden"
-                                style={{ opacity: isGpuSelected ? 1 : 0.5 }}
-                                title={gpu.name}
-                            >
-                                {gpu.name}
+        // The panel is its own query container so the chart/legend split follows
+        // the CARD's width, not the window's: the node list renders one, two or
+        // three cards per row, so a viewport media query sized the legend wrong
+        // at every window width. Containment is scoped to this wrapper rather
+        // than to .node-card so the card's tooltips and menus keep their
+        // original containing block.
+        <div className={`@container w-full min-w-0 ${className ? className : ''}`}>
+            <Flex
+                // overflow-x-auto is the last resort only: with the stacked
+                // layout below 720px and the minimums below, the body scrolls
+                // instead of clipping a legend that still cannot fit.
+                className="w-full min-w-0 flex-nowrap overflow-x-auto @max-[720px]:flex-col"
+                align="stretch"
+                gap="2"
+            >
+                {/* Chart Section (placeholder when no metrics) */}
+                <div className="grow min-w-[320px] @max-[720px]:min-w-0 overflow-hidden min-h-[200px] relative">
+                    <SvgLineChart
+                        datasets={datasets}
+                        maxDataPoints={30}
+                        yAxisMax={100}
+                        selectedKey={selectedMetric}
+                    />
+                    {!nodeMetrics && (
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                No metrics yet
                             </Text>
+                        </div>
+                    )}
+                </div>
 
-                            <Stack gap="1">
-                                {/* GPU Utilization */}
-                                <Flex
-                                    align="center"
-                                    gap="2"
-                                    className="cursor-pointer"
-                                    onClick={() => handleLegendClick(`gpu-${gpu.id}`)}
+                {/* Custom Legend / Hardware Info Section */}
+                <Stack
+                    gap="4"
+                    // Grows with the card between a 260px floor (fits the
+                    // longest device names on two lines) and a 420px ceiling so
+                    // the chart keeps the remainder. Stacked under the chart the
+                    // basis would apply to the block axis, so it is reset there.
+                    className="flex-[0_1_clamp(260px,32%,420px)] min-w-[260px] ml-2 self-center @max-[720px]:flex-none @max-[720px]:ml-0 @max-[720px]:w-full @max-[720px]:self-stretch"
+                >
+                    {/* GPU Metrics */}
+                    {hardwareInfo.gpus.map(gpu => {
+                        // Check if this GPU's metrics are selected
+                        const isGpuSelected =
+                            selectedMetric === undefined ||
+                            selectedMetric === `gpu-${gpu.id}` ||
+                            selectedMetric === `vram-${gpu.id}`
+
+                        return (
+                            <Stack gap="0" key={gpu.id}>
+                                <Text
+                                    kind="body/semibold/sm"
+                                    // Wraps onto a second line rather than being cut
+                                    // with an ellipsis; the title keeps the full name
+                                    // available on hover either way.
+                                    className="transition-opacity break-words"
+                                    style={{ opacity: isGpuSelected ? 1 : 0.5 }}
+                                    title={gpu.name}
                                 >
-                                    <div
-                                        className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                                        style={{
-                                            backgroundColor: `${gpu.color}BF`,
-                                            border: `2px solid ${gpu.color}`,
-                                            marginTop: '1px',
-                                            opacity:
-                                                selectedMetric === undefined ||
-                                                selectedMetric === `gpu-${gpu.id}`
-                                                    ? 1
-                                                    : 0.3
-                                        }}
-                                    />
+                                    {gpu.name}
+                                </Text>
 
-                                    <Flex
-                                        align="center"
-                                        gap="2"
-                                        className="transition-opacity"
-                                        style={{
-                                            opacity:
-                                                selectedMetric === undefined ||
-                                                selectedMetric === `gpu-${gpu.id}`
-                                                    ? 1
-                                                    : 0.5
-                                        }}
-                                    >
-                                        <Text kind="body/regular/sm">Usage</Text>
-                                        <Text kind="body/regular/sm">
-                                            {Math.floor(gpu.utilization)}%
-                                        </Text>
-                                    </Flex>
-                                </Flex>
-
-                                {/* GPU VRAM — skipped for an accelerator row (no VRAM figure) */}
-                                {!(gpu.kind === 'npu' && gpu.vramTotal === 0) && (
+                                <Stack gap="1">
+                                    {/* GPU Utilization */}
                                     <Flex
                                         align="center"
                                         gap="2"
                                         className="cursor-pointer"
-                                        onClick={() => handleLegendClick(`vram-${gpu.id}`)}
+                                        onClick={() => handleLegendClick(`gpu-${gpu.id}`)}
                                     >
-                                        <div
-                                            className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                                            style={{
-                                                backgroundColor: `${gpu.vramColor}BF`,
-                                                border: `2px solid ${gpu.vramColor}`,
-                                                marginTop: '1px',
-                                                opacity:
-                                                    selectedMetric === undefined ||
-                                                    selectedMetric === `vram-${gpu.id}`
-                                                        ? 1
-                                                        : 0.3
-                                            }}
-                                        />
-                                        <Flex
-                                            align="center"
-                                            gap="2"
-                                            className="transition-opacity"
-                                            style={{
-                                                opacity:
-                                                    selectedMetric === undefined ||
-                                                    selectedMetric === `vram-${gpu.id}`
-                                                        ? 1
-                                                        : 0.5
-                                            }}
-                                        >
-                                            <Text kind="body/regular/sm">VRAM</Text>
-                                            <Text kind="body/regular/sm">
-                                                {formatBytes(
-                                                    Math.floor(
-                                                        (gpu.vramTotal * gpu.vramUsage) / 100
-                                                    ),
-                                                    1
-                                                )}{' '}
-                                                / {gpu.vramFormatted}
-                                            </Text>
-                                        </Flex>
-                                    </Flex>
-                                )}
-                                {/* GPU temperature — a reading, not a chart series. A
-                                    device without one (an integrated GPU, a host without
-                                    nvidia-smi) gets no row rather than a placeholder. */}
-                                {gpu.temperature > 0 && (
-                                    <Flex align="center" gap="2">
                                         <div
                                             className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
                                             style={{
                                                 backgroundColor: `${gpu.color}BF`,
                                                 border: `2px solid ${gpu.color}`,
                                                 marginTop: '1px',
-                                                opacity: isGpuSelected ? 1 : 0.3
+                                                opacity:
+                                                    selectedMetric === undefined ||
+                                                    selectedMetric === `gpu-${gpu.id}`
+                                                        ? 1
+                                                        : 0.3
                                             }}
                                         />
+
                                         <Flex
                                             align="center"
                                             gap="2"
                                             className="transition-opacity"
-                                            style={{ opacity: isGpuSelected ? 1 : 0.5 }}
+                                            style={{
+                                                opacity:
+                                                    selectedMetric === undefined ||
+                                                    selectedMetric === `gpu-${gpu.id}`
+                                                        ? 1
+                                                        : 0.5
+                                            }}
                                         >
-                                            <Text kind="body/regular/sm">Temp</Text>
-                                            <Text kind="body/regular/sm">{gpu.temperature} °C</Text>
+                                            <Text kind="body/regular/sm">Usage</Text>
+                                            <Text kind="body/regular/sm">
+                                                {Math.floor(gpu.utilization)}%
+                                            </Text>
                                         </Flex>
                                     </Flex>
-                                )}
+
+                                    {/* GPU VRAM — skipped for an accelerator row (no VRAM figure) */}
+                                    {!(gpu.kind === 'npu' && gpu.vramTotal === 0) && (
+                                        <Flex
+                                            align="center"
+                                            gap="2"
+                                            className="cursor-pointer"
+                                            onClick={() => handleLegendClick(`vram-${gpu.id}`)}
+                                        >
+                                            <div
+                                                className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                                                style={{
+                                                    backgroundColor: `${gpu.vramColor}BF`,
+                                                    border: `2px solid ${gpu.vramColor}`,
+                                                    marginTop: '1px',
+                                                    opacity:
+                                                        selectedMetric === undefined ||
+                                                        selectedMetric === `vram-${gpu.id}`
+                                                            ? 1
+                                                            : 0.3
+                                                }}
+                                            />
+                                            <Flex
+                                                align="center"
+                                                gap="2"
+                                                className="transition-opacity"
+                                                style={{
+                                                    opacity:
+                                                        selectedMetric === undefined ||
+                                                        selectedMetric === `vram-${gpu.id}`
+                                                            ? 1
+                                                            : 0.5
+                                                }}
+                                            >
+                                                <Text kind="body/regular/sm">VRAM</Text>
+                                                <Text kind="body/regular/sm">
+                                                    {formatBytes(
+                                                        Math.floor(
+                                                            (gpu.vramTotal * gpu.vramUsage) / 100
+                                                        ),
+                                                        1
+                                                    )}{' '}
+                                                    / {gpu.vramFormatted}
+                                                </Text>
+                                            </Flex>
+                                        </Flex>
+                                    )}
+                                    {/* GPU temperature — a reading, not a chart series. A
+                                    device without one (an integrated GPU, a host without
+                                    nvidia-smi) gets no row rather than a placeholder. */}
+                                    {gpu.temperature > 0 && (
+                                        <Flex align="center" gap="2">
+                                            <div
+                                                className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                                                style={{
+                                                    backgroundColor: `${gpu.color}BF`,
+                                                    border: `2px solid ${gpu.color}`,
+                                                    marginTop: '1px',
+                                                    opacity: isGpuSelected ? 1 : 0.3
+                                                }}
+                                            />
+                                            <Flex
+                                                align="center"
+                                                gap="2"
+                                                className="transition-opacity"
+                                                style={{ opacity: isGpuSelected ? 1 : 0.5 }}
+                                            >
+                                                <Text kind="body/regular/sm">Temp</Text>
+                                                <Text kind="body/regular/sm">
+                                                    {gpu.temperature} °C
+                                                </Text>
+                                            </Flex>
+                                        </Flex>
+                                    )}
+                                </Stack>
                             </Stack>
-                        </Stack>
-                    )
-                })}
+                        )
+                    })}
 
-                {/* CPU */}
-                <Flex
-                    align="start"
-                    gap="2"
-                    className="cursor-pointer"
-                    onClick={() => handleLegendClick('cpu')}
-                >
-                    <div
-                        className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                        style={{
-                            backgroundColor: `${CHART_COLORS.CPU}BF`,
-                            border: `2px solid ${CHART_COLORS.CPU}`,
-                            marginTop: '4px',
-                            opacity:
-                                selectedMetric === undefined || selectedMetric === 'cpu' ? 1 : 0.3
-                        }}
-                    />
-                    <Stack
-                        className="transition-opacity overflow-hidden"
-                        style={{
-                            opacity:
-                                selectedMetric === undefined || selectedMetric === 'cpu' ? 1 : 0.5
-                        }}
+                    {/* CPU */}
+                    <Flex
+                        align="start"
+                        gap="2"
+                        className="cursor-pointer"
+                        onClick={() => handleLegendClick('cpu')}
                     >
-                        <Text
-                            kind="body/semibold/sm"
-                            className="text-nowrap text-ellipsis overflow-hidden"
-                            title={hardwareInfo.cpuModel}
+                        <div
+                            className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                            style={{
+                                backgroundColor: `${CHART_COLORS.CPU}BF`,
+                                border: `2px solid ${CHART_COLORS.CPU}`,
+                                marginTop: '4px',
+                                opacity:
+                                    selectedMetric === undefined || selectedMetric === 'cpu'
+                                        ? 1
+                                        : 0.3
+                            }}
+                        />
+                        <Stack
+                            className="min-w-0 transition-opacity"
+                            style={{
+                                opacity:
+                                    selectedMetric === undefined || selectedMetric === 'cpu'
+                                        ? 1
+                                        : 0.5
+                            }}
                         >
-                            {hardwareInfo.cpuModel}
-                        </Text>
-                        <Text kind="body/regular/sm">
-                            {Math.floor(hardwareInfo.cpuUtilization)}%{' '}
-                            {hardwareInfo.cpuCores ? `(${hardwareInfo.cpuCores} cores)` : ''}
-                            {hardwareInfo.cpuTemperature > 0
-                                ? ` · ${hardwareInfo.cpuTemperature} °C`
-                                : ''}
-                        </Text>
-                    </Stack>
-                </Flex>
+                            <Text
+                                kind="body/semibold/sm"
+                                className="break-words"
+                                title={hardwareInfo.cpuModel}
+                            >
+                                {hardwareInfo.cpuModel}
+                            </Text>
+                            <Text kind="body/regular/sm">
+                                {Math.floor(hardwareInfo.cpuUtilization)}%{' '}
+                                {hardwareInfo.cpuCores ? `(${hardwareInfo.cpuCores} cores)` : ''}
+                                {hardwareInfo.cpuTemperature > 0
+                                    ? ` · ${hardwareInfo.cpuTemperature} °C`
+                                    : ''}
+                            </Text>
+                        </Stack>
+                    </Flex>
 
-                {/* Memory */}
-                <Flex
-                    align="start"
-                    gap="2"
-                    className="cursor-pointer"
-                    onClick={() => handleLegendClick('memory')}
-                >
-                    <div
-                        className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                        style={{
-                            backgroundColor: `${CHART_COLORS.MEMORY}BF`,
-                            border: `2px solid ${CHART_COLORS.MEMORY}`,
-                            marginTop: '4px',
-                            opacity:
-                                selectedMetric === undefined || selectedMetric === 'memory'
-                                    ? 1
-                                    : 0.3
-                        }}
-                    />
-                    <Stack
-                        className="transition-opacity"
-                        style={{
-                            opacity:
-                                selectedMetric === undefined || selectedMetric === 'memory'
-                                    ? 1
-                                    : 0.5
-                        }}
+                    {/* Memory */}
+                    <Flex
+                        align="start"
+                        gap="2"
+                        className="cursor-pointer"
+                        onClick={() => handleLegendClick('memory')}
                     >
-                        <Text kind="body/semibold/sm">Memory</Text>
-                        <Text kind="body/regular/sm">
-                            {formatBytes(
-                                Math.floor(
-                                    (hardwareInfo.memoryTotal * hardwareInfo.memoryUsage) / 100
-                                ),
-                                1
-                            )}{' '}
-                            / {hardwareInfo.memory}
-                        </Text>
-                    </Stack>
-                </Flex>
-            </Stack>
-        </Flex>
+                        <div
+                            className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
+                            style={{
+                                backgroundColor: `${CHART_COLORS.MEMORY}BF`,
+                                border: `2px solid ${CHART_COLORS.MEMORY}`,
+                                marginTop: '4px',
+                                opacity:
+                                    selectedMetric === undefined || selectedMetric === 'memory'
+                                        ? 1
+                                        : 0.3
+                            }}
+                        />
+                        <Stack
+                            className="transition-opacity"
+                            style={{
+                                opacity:
+                                    selectedMetric === undefined || selectedMetric === 'memory'
+                                        ? 1
+                                        : 0.5
+                            }}
+                        >
+                            <Text kind="body/semibold/sm">Memory</Text>
+                            <Text kind="body/regular/sm">
+                                {formatBytes(
+                                    Math.floor(
+                                        (hardwareInfo.memoryTotal * hardwareInfo.memoryUsage) / 100
+                                    ),
+                                    1
+                                )}{' '}
+                                / {hardwareInfo.memory}
+                            </Text>
+                        </Stack>
+                    </Flex>
+                </Stack>
+            </Flex>
+        </div>
     )
 }
