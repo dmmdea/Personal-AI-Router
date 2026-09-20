@@ -1,0 +1,201 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"errors"
+	"io"
+	"log/slog"
+	"testing"
+	"time"
+)
+
+// fakeSensor scripts read results; each read consumes the next entry and the
+// last one repeats.
+type fakeSensor struct {
+	script []readResult
+	reads  int
+	closed bool
+}
+
+type readResult struct {
+	c   uint32
+	err error
+}
+
+func (f *fakeSensor) read() (uint32, error) {
+	i := f.reads
+	if i >= len(f.script) {
+		i = len(f.script) - 1
+	}
+	f.reads++
+	return f.script[i].c, f.script[i].err
+}
+
+func (f *fakeSensor) tjMax() uint32 { return 100 }
+
+func (f *fakeSensor) close() { f.closed = true }
+
+// opener counts opens and hands out sensors from a queue; an empty queue
+// means open fails with failErr.
+type opener struct {
+	queue   []*fakeSensor
+	opens   int
+	failErr error
+}
+
+func (o *opener) open() (packageSensor, error) {
+	o.opens++
+	if len(o.queue) == 0 {
+		return nil, o.failErr
+	}
+	s := o.queue[0]
+	o.queue = o.queue[1:]
+	return s, nil
+}
+
+func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+const (
+	tickInterval = 2 * time.Second
+	tickRetry    = 30 * time.Second
+)
+
+// TestSamplerTickPublishesReadingsAndSurvivesOneBadRead: a good read
+// publishes a stamped reading; a single failed read publishes the reason at
+// the normal cadence without a reopen; the next good read resumes.
+func TestSamplerTickPublishesReadingsAndSurvivesOneBadRead(t *testing.T) {
+	now := time.Date(2026, 9, 19, 22, 30, 0, 0, time.UTC)
+	fs := &fakeSensor{script: []readResult{{c: 58}, {err: errors.New("reading not valid")}, {c: 60}}}
+	o := &opener{queue: []*fakeSensor{fs}}
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, func() time.Time { return now })
+	st := &samplerState{}
+
+	if r := s.report(); r.CPU != nil || r.Error != "starting" {
+		t.Fatalf("before the first tick: %+v", r)
+	}
+	if d := s.tick(st); d != tickInterval {
+		t.Fatalf("delay after a good read = %s, want %s", d, tickInterval)
+	}
+	r := s.report()
+	if r.CPU == nil || r.CPU.PackageCelsius != 58 || r.CPU.TjMaxCelsius != 100 || r.CPU.Source != sourceIntelMSR || !r.CPU.SampledAt.Equal(now) || r.Error != "" {
+		t.Fatalf("first reading: %+v cpu=%+v", r, r.CPU)
+	}
+
+	if d := s.tick(st); d != tickInterval {
+		t.Fatalf("delay after one bad read = %s, want %s (no reopen)", d, tickInterval)
+	}
+	if r := s.report(); r.CPU != nil || r.Error != "reading not valid" {
+		t.Fatalf("after one bad read: %+v", r)
+	}
+	if o.opens != 1 || fs.closed {
+		t.Fatalf("one bad read must not reopen: opens=%d closed=%v", o.opens, fs.closed)
+	}
+
+	s.tick(st)
+	if r := s.report(); r.CPU == nil || r.CPU.PackageCelsius != 60 || r.Error != "" {
+		t.Fatalf("recovered reading: %+v", r)
+	}
+	if st.failures != 0 {
+		t.Fatalf("failure streak not reset: %d", st.failures)
+	}
+}
+
+// TestSamplerTickReopensAfterRepeatedReadFailures: after
+// sensorReopenAfterFailures consecutive failures the executor is closed, the
+// retry delay applies, and the next tick reopens and reads from the new
+// sensor.
+func TestSamplerTickReopensAfterRepeatedReadFailures(t *testing.T) {
+	dead := &fakeSensor{script: []readResult{{c: 55}, {err: errors.New("HRESULT 0x80070006")}}}
+	fresh := &fakeSensor{script: []readResult{{c: 57}}}
+	o := &opener{queue: []*fakeSensor{dead, fresh}}
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, time.Now)
+	st := &samplerState{}
+
+	s.tick(st)
+	if r := s.report(); r.CPU == nil || r.CPU.PackageCelsius != 55 {
+		t.Fatalf("first reading: %+v", r)
+	}
+	for i := 1; i < sensorReopenAfterFailures; i++ {
+		if d := s.tick(st); d != tickInterval {
+			t.Fatalf("failure %d: delay = %s, want %s", i, d, tickInterval)
+		}
+		if dead.closed {
+			t.Fatalf("failure %d: closed too early", i)
+		}
+	}
+	if d := s.tick(st); d != tickRetry {
+		t.Fatalf("failure %d: delay = %s, want retry %s", sensorReopenAfterFailures, d, tickRetry)
+	}
+	if !dead.closed || st.sensor != nil {
+		t.Fatalf("the failed executor must be closed and dropped: closed=%v sensor=%v", dead.closed, st.sensor)
+	}
+	if r := s.report(); r.CPU != nil || r.Error != "HRESULT 0x80070006" {
+		t.Fatalf("report while reopening: %+v", r)
+	}
+
+	if d := s.tick(st); d != tickInterval {
+		t.Fatalf("delay after reopen = %s, want %s", d, tickInterval)
+	}
+	if o.opens != 2 {
+		t.Fatalf("opens = %d, want 2", o.opens)
+	}
+	if r := s.report(); r.CPU == nil || r.CPU.PackageCelsius != 57 || r.Error != "" {
+		t.Fatalf("reading from the reopened sensor: %+v", r)
+	}
+}
+
+// TestSamplerTickRetriesOpenUntilItSucceeds: with no sensor the report
+// carries the reason and no CPU, at the retry cadence; once open succeeds a
+// reading appears.
+func TestSamplerTickRetriesOpenUntilItSucceeds(t *testing.T) {
+	o := &opener{failErr: errors.New("PawnIO is not installed")}
+	s := newSampler(tickInterval, tickRetry, quietLog(), o.open, time.Now)
+	st := &samplerState{}
+
+	for i := 0; i < 3; i++ {
+		if d := s.tick(st); d != tickRetry {
+			t.Fatalf("attempt %d: delay = %s, want retry %s", i, d, tickRetry)
+		}
+		if r := s.report(); r.CPU != nil || r.Error != "PawnIO is not installed" {
+			t.Fatalf("attempt %d: %+v", i, r)
+		}
+	}
+	if o.opens != 3 {
+		t.Fatalf("opens = %d, want 3", o.opens)
+	}
+	o.queue = []*fakeSensor{{script: []readResult{{c: 61}}}}
+	if d := s.tick(st); d != tickInterval {
+		t.Fatalf("delay after late open = %s, want %s", d, tickInterval)
+	}
+	if r := s.report(); r.CPU == nil || r.CPU.PackageCelsius != 61 || r.Error != "" {
+		t.Fatalf("reading after late open: %+v", r)
+	}
+}
+
+// TestSamplerStopClosesSensor guards shutdown through the real loop: Stop
+// returns promptly during a long wait and releases the executor.
+func TestSamplerStopClosesSensor(t *testing.T) {
+	fs := &fakeSensor{script: []readResult{{c: 50}}}
+	o := &opener{queue: []*fakeSensor{fs}}
+	s := newSampler(time.Hour, time.Hour, quietLog(), o.open, time.Now)
+	go s.run()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.report().CPU == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("no reading from the running loop")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	done := make(chan struct{})
+	go func() { s.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+	if !fs.closed {
+		t.Fatal("Stop must close the sensor")
+	}
+}

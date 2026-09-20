@@ -166,18 +166,46 @@ export const MODULAR_RUNTIME_BINARIES: ModularRuntimeBinary[] = [
     }
 ]
 
+interface ModularBundledBinary {
+    baseName: string
+    /**
+     * Platforms the binary is built and shipped for. Absent means every
+     * platform. A platform-scoped binary is still a `versions.json` component
+     * (one version line, one build step) but is left out of the other
+     * platforms' cli-bin, their manifest, and their Service settings list.
+     */
+    platforms?: readonly SupportedPlatform[]
+}
+
 /**
  * Binaries bundled in the installer but not spawned by Electron or the broker.
  * `nvpair-tui` is a headless terminal client that spawns its own `nvpair-ui-broker` —
- * see `services/nvpair-tui/README.md`.
+ * see `services/nvpair-tui/README.md`. `nvpair-sensors` is the Windows-only
+ * elevated host-sensor service that `nvpair-node-info` reads the CPU package
+ * temperature from; the installer registers it as a Windows service
+ * (scripts/build/installer.nsh) — see `services/nvpair-sensors/README.md`.
  */
-export const MODULAR_BUNDLED_BINARIES: { baseName: string }[] = [{ baseName: 'nvpair-tui' }]
+export const MODULAR_BUNDLED_BINARIES: readonly ModularBundledBinary[] = [
+    { baseName: 'nvpair-tui' },
+    { baseName: 'nvpair-sensors', platforms: ['win32'] }
+]
 
-/** Every backend binary shipped in the installer (runtime workers + bundled tools). */
-export function modularShippedBinaryBaseNames(): string[] {
+/** The bundled binaries that ship for `platform` (all of them when omitted). */
+export function modularBundledBinariesFor(platform?: SupportedPlatform): ModularBundledBinary[] {
+    return MODULAR_BUNDLED_BINARIES.filter(
+        binary => platform === undefined || !binary.platforms || binary.platforms.includes(platform)
+    )
+}
+
+/**
+ * Every backend binary shipped in the installer (runtime workers + bundled
+ * tools). With a `platform`, only the binaries that platform's package carries;
+ * without one, the union across platforms (the `versions.json` component set).
+ */
+export function modularShippedBinaryBaseNames(platform?: SupportedPlatform): string[] {
     return [
         ...MODULAR_RUNTIME_BINARIES.map(binary => binary.baseName),
-        ...MODULAR_BUNDLED_BINARIES.map(binary => binary.baseName)
+        ...modularBundledBinariesFor(platform).map(binary => binary.baseName)
     ]
 }
 

@@ -197,6 +197,10 @@ type statsCollector struct {
 	// tick merges its latest LUID-keyed temperatures into the snapshot.
 	gpuTemps *gpuTempPoller
 
+	// cpuTemp polls the elevated nvpair-sensors helper over its named pipe
+	// (cputemp_windows.go); each tick publishes its latest package reading.
+	cpuTemp *cpuTempPoller
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -232,6 +236,7 @@ func startStatsCollector() *statsCollector {
 	}
 
 	c.gpuTemps = startGPUTempPoller()
+	c.cpuTemp = startCPUTempPoller()
 	go c.run()
 	return c
 }
@@ -347,6 +352,10 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	// LUID keys as the PDH counters; merged after the stale-preserve step so
 	// a previously published map is cloned, never mutated.
 	c.gpuTemps.mergeInto(snap)
+	// The CPU package temperature comes from the helper's pipe through its
+	// own poller; zero (omitted) while the helper is absent or its reading
+	// is stale.
+	snap.CPUTempC = c.cpuTemp.current()
 
 	if used, ok := readMemoryUsed(); ok {
 		snap.MemUsedBytes = used
@@ -554,6 +563,7 @@ func (c *statsCollector) Stop() {
 		close(c.stop)
 		<-c.done
 		c.gpuTemps.Stop()
+		c.cpuTemp.Stop()
 		if c.query != 0 {
 			procPdhCloseQuery.Call(c.query)
 			c.query = 0
