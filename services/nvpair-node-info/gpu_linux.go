@@ -25,11 +25,12 @@ const nvidiaSmiTimeout = 3 * time.Second
 // detectGPUs enumerates GPUs on Linux. It prefers nvidia-smi, which yields the
 // marketing name, total VRAM, and a stable per-GPU UUID we reuse as the join
 // key (statsKey) against the dynamic stats collector's snapshot. When
-// nvidia-smi is absent — no NVIDIA driver, or an AMD/Intel-only host — it falls
-// back to amdgpu's own sysfs inventory (gpu_amd_linux.go), and then to ghw,
-// which reports adapter names but no VRAM and no join key, so those hosts
-// list their GPUs without dynamic VRAM/utilization (matching the
-// pre-existing non-Windows behavior).
+// nvidia-smi is absent — no NVIDIA driver, or an AMD/Intel-only host — it tries
+// the Rockchip SoC detectors (gpu_rockchip_linux.go: a Mali GPU and an RKNPU,
+// neither of which is a PCI adapter), then amdgpu's own sysfs inventory
+// (gpu_amd_linux.go), and finally falls back to ghw, which reports adapter
+// names but no VRAM and no join key, so those hosts list their GPUs without
+// dynamic VRAM/utilization (matching the pre-existing non-Windows behavior).
 //
 // On unified-memory architectures (UMA, e.g. Grace-Blackwell / DGX Spark)
 // nvidia-smi reports [N/A] for memory.total because the GPU shares system
@@ -48,6 +49,9 @@ func detectGPUs() []GPUInfo {
 			}
 			return gpus
 		}
+	}
+	if rockchip := detectRockchipDevices(); len(rockchip) > 0 {
+		return rockchip
 	}
 	return detectAMDOrGHWGPUs()
 }
