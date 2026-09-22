@@ -436,9 +436,8 @@ type GPUInfo struct {
 	// Kind distinguishes a display/compute GPU (empty, the historical default)
 	// from every other device listed in the same inventory: a dedicated
 	// inference accelerator such as an Edge TPU or an NPU
-	// (GPUKindAccelerator), or the host's motherboard controller
-	// (GPUKindBoard). They are listed here so every client shows them, but
-	// none of them can run the engines PAIR schedules, so their utilization
+	// (GPUKindAccelerator). They are listed here so every client shows them,
+	// but none of them can run the engines PAIR schedules, so their utilization
 	// never feeds a node's GPU pressure — see MaxGPUUtilization.
 	Kind string `json:"kind,omitempty"`
 	// TemperatureCelsius is the device's own thermal readout when the driver
@@ -448,7 +447,7 @@ type GPUInfo struct {
 	// when its driver meters itself: an NVIDIA GPU's power.draw and an AMD
 	// card's hwmon PPT input. Zero — and so absent — everywhere no meter
 	// exists: an integrated GPU, an Arm Mali GPU, an RKNPU, an Edge TPU, a
-	// Hailo module, the board row. A device that cannot be metered publishes
+	// Hailo module. A device that cannot be metered publishes
 	// nothing rather than a zero a client would render as "drawing no power".
 	PowerWatts float64 `json:"power_watts,omitempty"`
 	// MemoryPool says where VramBytes comes from. Empty — the historical
@@ -476,14 +475,6 @@ const GPUMemoryPoolUnified = "unified"
 // GPUKindAccelerator marks a GPUInfo row that describes a dedicated inference
 // accelerator rather than a GPU: an Edge TPU, an NPU, an M.2 AI module.
 const GPUKindAccelerator = "npu"
-
-// GPUKindBoard marks a GPUInfo row that describes the host's motherboard
-// controller — ASUS's TPU + EPU pair, and the equivalents other vendors fit —
-// listed here so a client shows the board beside the devices it feeds. The
-// row carries a temperature and nothing else: those controllers publish no
-// load or status interface on Windows, and a fabricated utilization would
-// read exactly like a real one.
-const GPUKindBoard = "board"
 
 // MaxGPUUtilization is the node-level GPU busy figure the scheduler's pressure
 // model consumes: the highest utilization across the node's GPUs.

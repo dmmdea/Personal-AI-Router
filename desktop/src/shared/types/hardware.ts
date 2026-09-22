@@ -6,10 +6,8 @@ export interface GpuInfo {
     name: string
     vramTotal: number // in bytes
     // Absent for a GPU. "npu" for a dedicated inference accelerator (Edge TPU
-    // / NPU) and "board" for the host's motherboard controller, both of which
-    // node-info lists beside the GPUs. Neither has a VRAM figure and the board
-    // has no busy counter either, so the UI drops those lines for them — see
-    // ui/utils/hardware-rows.ts.
+    // / NPU), which node-info lists beside the GPUs. It may have no VRAM
+    // figure, and the UI then drops that line — see ui/utils/hardware-rows.ts.
     kind?: string
     // MEMORY_POOL_UNIFIED when vramTotal is a pool the device shares with the
     // host (an integrated GPU, an Apple Silicon GPU, a UMA part) rather than

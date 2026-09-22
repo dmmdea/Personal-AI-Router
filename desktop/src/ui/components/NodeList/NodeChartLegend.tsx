@@ -8,7 +8,6 @@ import {
     memoryLabel,
     memoryLineValue,
     showsMemoryLine,
-    showsUsage,
     thermalLine
 } from '@/ui/utils/hardware-rows'
 
@@ -78,10 +77,7 @@ function NodeChartLegend({
                 return (
                     <Stack key={gpu.id} gap="1">
                         <Text kind="body/semibold/sm">{gpu.name}</Text>
-                        {/* The motherboard controller reports no busy figure at
-                        all, so it gets no Usage line rather than a "0%" that
-                        would read as idle. */}
-                        {showsUsage(gpu) && (
+                        {
                             <Flex align="center" gap="2">
                                 <ColorDot color={gpu.usageColor} />
                                 <Flex align="center" gap="2">
@@ -91,9 +87,8 @@ function NodeChartLegend({
                                     <Text kind="body/semibold/sm">{gpu.usage}%</Text>
                                 </Flex>
                             </Flex>
-                        )}
-                        {/* An accelerator (Edge TPU / NPU) and the motherboard
-                        controller have no VRAM figure; the row would only ever
+                        }
+                        {/* An accelerator (Edge TPU / NPU) may have no VRAM figure; the row would only ever
                         read "0 B / 0 B". A device sharing the host's memory
                         reads "Shared" — and gets a line only when something
                         measured the pool, because a bare shared ceiling is a

@@ -18,8 +18,7 @@ export type GpuInfo = {
     // the temperature ("50 °C (200 W)"), or on a line of its own when the
     // device is metered but has no thermal readout.
     power: number
-    // "npu" for an accelerator row (no VRAM) or "board" for the motherboard
-    // controller (no VRAM and no usage); absent for a GPU.
+    // "npu" for an accelerator row (no VRAM); absent for a GPU.
     kind?: string
     // "unified" when vramTotal is a pool shared with the host; absent for a
     // discrete card. Drives the "Shared" vs "VRAM" label.

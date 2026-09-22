@@ -34,11 +34,6 @@ func TestMaxGPUUtilization(t *testing.T) {
 			want: 0,
 		},
 		{
-			name: "board row excluded",
-			gpus: []GPUInfo{{Name: "NVIDIA A2", UtilizationPercent: 20}, {Name: "ROG Dual Intelligent Processors", Kind: GPUKindBoard, TemperatureCelsius: 44}},
-			want: 20,
-		},
-		{
 			// The rule is "GPUs only", not "everything but the kinds that
 			// existed when this was written": a kind added later must be
 			// skipped without anyone remembering to come back here.
@@ -49,7 +44,7 @@ func TestMaxGPUUtilization(t *testing.T) {
 		{
 			name: "non-GPU rows only read as idle",
 			gpus: []GPUInfo{
-				{Name: "ROG Dual Intelligent Processors", Kind: GPUKindBoard, TemperatureCelsius: 44},
+				{Name: "something new", Kind: "fpga", TemperatureCelsius: 44},
 				{Name: "Google Coral Edge TPU", Kind: GPUKindAccelerator, UtilizationPercent: 100},
 			},
 			want: 0,
@@ -76,19 +71,6 @@ func TestGPUInfoWireShape(t *testing.T) {
 	for _, want := range []string{`"kind":"npu"`, `"temperature_celsius":52`, `"utilization_percent":30`} {
 		if !strings.Contains(string(accel), want) {
 			t.Fatalf("accelerator row missing %s: %s", want, accel)
-		}
-	}
-	board, _ := json.Marshal(GPUInfo{Name: "ROG Dual Intelligent Processors", Kind: GPUKindBoard, TemperatureCelsius: 44})
-	for _, want := range []string{`"kind":"board"`, `"temperature_celsius":44`} {
-		if !strings.Contains(string(board), want) {
-			t.Fatalf("board row missing %s: %s", want, board)
-		}
-	}
-	// A board controller has no VRAM and publishes no utilization; both must
-	// drop out rather than appear as a zero a client would render.
-	for _, absent := range []string{"vram", "utilization"} {
-		if strings.Contains(string(board), absent) {
-			t.Fatalf("board row carries %s: %s", absent, board)
 		}
 	}
 	if strings.Contains(string(accel), "vram") {
