@@ -6,6 +6,10 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
 	"reflect"
 	"testing"
 
@@ -396,6 +400,21 @@ func TestIsNvidiaSmiNA(t *testing.T) {
 	for _, c := range cases {
 		if got := isNvidiaSmiNA(c.in); got != c.want {
 			t.Fatalf("isNvidiaSmiNA(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestNvidiaSmiMissingOnlyLatchesAbsentBinary pins the latch decision: a
+// timeout on a loaded card or a non-zero exit during a driver reset used to
+// end GPU telemetry for the life of the process. Only a missing binary may.
+func TestNvidiaSmiMissingOnlyLatchesAbsentBinary(t *testing.T) {
+	missing := &exec.Error{Name: "nvidia-smi", Err: exec.ErrNotFound}
+	if !nvidiaSmiMissing(missing) || !nvidiaSmiMissing(fmt.Errorf("query: %w", missing)) {
+		t.Fatal("a missing nvidia-smi must latch")
+	}
+	for _, err := range []error{context.DeadlineExceeded, errors.New("exit status 1"), &exec.ExitError{}} {
+		if nvidiaSmiMissing(err) {
+			t.Errorf("%v latched the collector off for good", err)
 		}
 	}
 }

@@ -6,9 +6,11 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"math"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,9 +74,13 @@ type statsCollector struct {
 	// goroutine reads or writes it, so no synchronization is needed.
 	prevCPU cpuTimes
 
-	// nvidiaUnavailable latches on the first nvidia-smi failure so we don't
-	// re-spawn (and re-warn about) a missing binary every tick.
+	// nvidiaUnavailable latches when nvidia-smi is not installed so we don't
+	// re-spawn (and re-warn about) a missing binary every tick. Any other
+	// failure (a timeout on a busy card, a driver reset) is retried next tick.
 	nvidiaUnavailable atomic.Bool
+	// nvidiaFailing marks a streak of transient failures so it logs once.
+	// Only the ticker goroutine touches it.
+	nvidiaFailing bool
 
 	// accels are the per-device inference-accelerator samplers (accel_linux.go),
 	// one goroutine each at a finer interval than the tick; the tick only folds
@@ -219,8 +225,10 @@ func (c *statsCollector) mergeAccelStats(snap *statsSnapshot) {
 }
 
 // decodeGPU queries nvidia-smi and folds the per-GPU results into out, keyed
-// by UUID. On the first failure it latches nvidiaUnavailable so subsequent
-// ticks short-circuit silently. Unified-memory usage remains available through
+// by UUID. A missing binary latches nvidiaUnavailable so subsequent ticks
+// short-circuit silently; any other failure is retried on the next tick, so
+// one slow query on a loaded card cannot end GPU telemetry for the life of
+// the process. Unified-memory usage remains available through
 // the independent /proc/meminfo sample assembled by buildResponse.
 func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	if c.nvidiaUnavailable.Load() {
@@ -228,11 +236,20 @@ func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	}
 	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used,temperature.gpu,power.draw")
 	if err != nil {
-		if c.nvidiaUnavailable.CompareAndSwap(false, true) {
-			slog.Warn("nvidia-smi unavailable; GPU utilization / dedicated VRAM-used will not be reported",
-				"err", err)
+		if nvidiaSmiMissing(err) {
+			if c.nvidiaUnavailable.CompareAndSwap(false, true) {
+				slog.Warn("nvidia-smi unavailable; GPU utilization / dedicated VRAM-used will not be reported",
+					"err", err)
+			}
+		} else if !c.nvidiaFailing {
+			c.nvidiaFailing = true
+			slog.Warn("nvidia-smi query failed; retrying every tick", "err", err)
 		}
 		return false
+	}
+	if c.nvidiaFailing {
+		c.nvidiaFailing = false
+		slog.Info("nvidia-smi answering again")
 	}
 	parsed, utilizationSamples := parseNvidiaDynamic(csv)
 	for k, v := range parsed {
@@ -427,4 +444,10 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		res[uuid] = stat
 	}
 	return res, utilizationSamples
+}
+
+// nvidiaSmiMissing reports whether an nvidia-smi failure means the binary is
+// not on this host — the only failure worth latching off for good.
+func nvidiaSmiMissing(err error) bool {
+	return errors.Is(err, exec.ErrNotFound)
 }
