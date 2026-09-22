@@ -4,6 +4,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -66,6 +67,17 @@ type GPUInfo struct {
 	// Empty on hosts with no dynamic GPU source.
 	// Unexported + json:"-" so it never travels over the wire.
 	statsKey string `json:"-"`
+
+	// hardwareKey is the device's physical identity where statsKey can be
+	// reissued while the process runs. A Windows adapter LUID is: the display
+	// driver being installed, updated or restarted after this service started
+	// gives the same card a new LUID, so the startup row and the re-detected
+	// row would carry different statsKeys for one device. Windows sets it to
+	// "pci:<bb:dd.f>"; every other platform leaves it empty because its
+	// statsKey (a GPU UUID, a PCI address, an IORegistry entry) already is the
+	// stable identity. mergeGPUInventory uses it to move a row to its new
+	// statsKey instead of appending a second row for the same card.
+	hardwareKey string `json:"-"`
 
 	// usesSystemMemoryUsage makes response assembly map the independently
 	// collected system-memory usage onto VramUsedBytes. It is set by ONE
@@ -222,7 +234,7 @@ func buildResponse(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap sta
 }
 
 func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap statsSnapshot, hostUUID string, clusterUUID *string, now time.Time) []byte {
-	outGPUs := mergeGPUInventory(gpus, snap.GPUInventory)
+	outGPUs := mergeGPUInventory(gpus, snap.GPUInventory, snap.GPUHardwareKeys)
 	for i := range outGPUs {
 		gpu := &outGPUs[i]
 		if gpu.usesSystemMemoryUsage {
@@ -274,18 +286,64 @@ func telemetryStatus(sampledAt, now time.Time) (bool, int64) {
 	return true, age.Milliseconds()
 }
 
-func mergeGPUInventory(static, recovered []GPUInfo) []GPUInfo {
+// mergeGPUInventory folds a re-detected adapter list into the startup one.
+// A recovered adapter whose statsKey the startup list already has fills in
+// that row; one that is new is appended; no startup row is ever dropped.
+//
+// The exception is a device whose statsKey was reissued (see
+// GPUInfo.hardwareKey): a recovered adapter with a new statsKey but the same
+// hardwareKey as a startup row whose own statsKey is no longer in the
+// re-detected list is that same card, so the row takes the new statsKey and
+// keeps its position. Without it a display-driver reinstall after startup
+// leaves the card listed twice — the startup row joined to readings keyed by
+// the dead LUID and an appended row joined to the live one. The "no longer
+// re-detected" condition keeps a genuine second adapter at the same address
+// (a remoting clone that got past the registry gate) from stealing the live
+// row's statsKey; that case still appends, exactly as before.
+//
+// A startup row can lack a hardwareKey: the card's PCI address could not be
+// read at boot (its display driver was not ready). Such a row takes the
+// hardwareKey its statsKey was re-detected with, as Name and VramBytes are
+// filled in — from recovered, or from hardwareKeys, every statsKey ->
+// hardwareKey pairing a re-detection reported while this process ran
+// (statsSnapshot.GPUHardwareKeys; nil where no collector keeps one). The
+// remembered pairing is the one that matters: this function keeps nothing
+// between calls, and by the time the card's statsKey is reissued the
+// re-detected list no longer holds the startup statsKey to copy from.
+func mergeGPUInventory(static, recovered []GPUInfo, hardwareKeys map[string]string) []GPUInfo {
 	merged := make([]GPUInfo, len(static))
 	copy(merged, static)
+	live := make(map[string]bool, len(recovered))
+	redetected := make(map[string]string, len(recovered))
+	for _, gpu := range recovered {
+		live[gpu.statsKey] = true
+		if gpu.hardwareKey != "" {
+			redetected[gpu.statsKey] = gpu.hardwareKey
+		}
+	}
 	byStatsKey := make(map[string]int, len(merged))
+	byHardwareKey := make(map[string]int, len(merged))
 	for i := range merged {
 		if merged[i].statsKey != "" {
 			byStatsKey[merged[i].statsKey] = i
+			if merged[i].hardwareKey == "" {
+				merged[i].hardwareKey = cmp.Or(redetected[merged[i].statsKey], hardwareKeys[merged[i].statsKey])
+			}
+		}
+		if merged[i].hardwareKey != "" {
+			byHardwareKey[merged[i].hardwareKey] = i
 		}
 	}
 	for _, gpu := range recovered {
 		if gpu.statsKey == "" {
 			continue
+		}
+		if _, ok := byStatsKey[gpu.statsKey]; !ok && gpu.hardwareKey != "" {
+			if index, same := byHardwareKey[gpu.hardwareKey]; same && !live[merged[index].statsKey] {
+				delete(byStatsKey, merged[index].statsKey)
+				merged[index].statsKey = gpu.statsKey
+				byStatsKey[gpu.statsKey] = index
+			}
 		}
 		if index, ok := byStatsKey[gpu.statsKey]; ok {
 			if merged[index].Name == "" {
@@ -297,6 +355,9 @@ func mergeGPUInventory(static, recovered []GPUInfo) []GPUInfo {
 			continue
 		}
 		byStatsKey[gpu.statsKey] = len(merged)
+		if gpu.hardwareKey != "" {
+			byHardwareKey[gpu.hardwareKey] = len(merged)
+		}
 		merged = append(merged, gpu)
 	}
 	return merged

@@ -48,6 +48,13 @@ type gpuStat struct {
 type statsSnapshot struct {
 	GPU          map[string]gpuStat
 	GPUInventory []GPUInfo
+	// GPUHardwareKeys is every statsKey -> GPUInfo.hardwareKey pairing a
+	// re-detection has reported while the process ran, including statsKeys no
+	// longer detected. Only the Windows collector fills it (its statsKey, an
+	// adapter LUID, can be reissued); mergeGPUInventory uses it to give a
+	// startup row whose PCI address was unreadable at boot the identity a
+	// later reissue of that card is matched by. Never mutated after publish.
+	GPUHardwareKeys map[string]string
 	// GPUSampledAt is the collection time of the latest usable GPU
 	// utilization sample. A zero value means no usable sample has ever been
 	// collected. Failed collection attempts retain the previous timestamp so

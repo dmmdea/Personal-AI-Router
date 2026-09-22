@@ -14,6 +14,26 @@ import (
 	"time"
 )
 
+// TestAdapterAddressKeyRejectsSoftwareSentinel: a software adapter's
+// all-0xFFFFFFFF answer is no address. Keyed as "ff:ffff.ffff" it would be an
+// identity every such adapter shares, which mergeGPUInventory could match.
+func TestAdapterAddressKeyRejectsSoftwareSentinel(t *testing.T) {
+	const none = 0xFFFFFFFF
+	for _, addr := range []d3dkmtAdapterAddress{
+		{none, none, none},
+		{none, 0, 0},
+		{4, none, 0},
+		{4, 0, none},
+	} {
+		if key, ok := adapterAddressKey(addr); ok || key != "" {
+			t.Errorf("adapterAddressKey(%+v) = %q, %v; want no address", addr, key, ok)
+		}
+	}
+	if key, ok := adapterAddressKey(d3dkmtAdapterAddress{0x04, 0, 0}); !ok || key != "04:00.0" {
+		t.Errorf("adapterAddressKey(04:00.0) = %q, %v", key, ok)
+	}
+}
+
 func TestNvidiaBusIDKey(t *testing.T) {
 	cases := map[string]string{
 		"00000000:65:00.0":   "65:00.0",

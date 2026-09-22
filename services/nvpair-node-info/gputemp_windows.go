@@ -165,6 +165,17 @@ func adapterAddressForLuid(low uint32, high int32) (string, bool) {
 	if st, _, _ := procD3DKMTQueryAdapterInfo.Call(uintptr(unsafe.Pointer(&q))); st != 0 {
 		return "", false
 	}
+	return adapterAddressKey(addr)
+}
+
+// adapterAddressKey renders a queried adapter address as "bb:dd.f". A software
+// adapter answers with every field set to 0xFFFFFFFF (measured: Microsoft Basic
+// Render Driver renders as "ff:ffff.ffff"). That is "no address", not an
+// address two adapters could share, so ok is false for it.
+func adapterAddressKey(addr d3dkmtAdapterAddress) (string, bool) {
+	if addr.BusNumber == 0xFFFFFFFF || addr.DeviceNumber == 0xFFFFFFFF || addr.FunctionNumber == 0xFFFFFFFF {
+		return "", false
+	}
 	return pciAddressKey(addr.BusNumber, addr.DeviceNumber, addr.FunctionNumber), true
 }
 
@@ -182,8 +193,8 @@ func luidsByPCIAddress() map[string]string {
 	candidates := enumerateAdapterCandidates()
 	out := make(map[string]string, len(candidates))
 	for _, c := range candidates {
-		if addr, ok := adapterAddressForLuid(c.luidLow, c.luidHigh); ok {
-			out[addr] = c.gpu.statsKey
+		if c.pciAddress != "" {
+			out[c.pciAddress] = c.gpu.statsKey
 		}
 	}
 	return out
@@ -247,24 +258,32 @@ func parseNvidiaSensors(out string) map[string]gpuSensorSample {
 // readings atomically for the PDH tick to merge.
 type gpuTempPoller struct {
 	// byAddress maps PCI address -> LUID key. Resolved at start and re-resolved
-	// by poll() when a reading arrives for an address it does not know; only the
-	// poll goroutine ever touches it.
+	// by poll() when a reading arrives for an address it does not know or after
+	// invalidate; only the poll goroutine ever touches it.
 	byAddress   map[string]string
 	latest      atomic.Pointer[map[string]gpuSensorSample]
 	unavailable atomic.Bool
+	// remap is set by the inventory loop when a detection gains a statsKey
+	// (invalidate); the next poll re-resolves byAddress before joining. It is
+	// what moves a known address to its new LUID after a driver restart,
+	// which the unknown-address re-resolve in poll can never see.
+	remap atomic.Bool
+	// resolve builds byAddress; luidsByPCIAddress unless a test swaps it.
+	resolve func() map[string]string
 	// query runs one nvidia-smi read; nvidiaSmiSensors unless a test swaps it.
 	query func() (map[string]gpuSensorSample, error)
 	// failing is true while consecutive polls fail, so a failure streak logs
 	// once and its end logs once. Only the poll goroutine touches it.
 	failing bool
-	stop        chan struct{}
-	done        chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
 }
 
 func startGPUTempPoller() *gpuTempPoller {
 	p := &gpuTempPoller{
 		byAddress: luidsByPCIAddress(),
 		query:     nvidiaSmiSensors,
+		resolve:   luidsByPCIAddress,
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
@@ -292,15 +311,26 @@ func (p *gpuTempPoller) run() {
 
 // poll reads nvidia-smi and republishes the LUID-keyed reading map.
 //
-// byAddress is resolved once at start because LUIDs are fixed for the life of
-// a boot, but a reading can still arrive for an address it does not know: the
-// display driver may not have been ready when the poller started, or an
-// adapter appeared later (hot-plug, or a GPU recovered by the inventory
-// retry). One re-resolve per poll covers both without re-enumerating DXGI on
-// every tick.
+// byAddress is resolved at start and is NOT fixed for the life of a boot: the
+// display driver being installed, updated or restarted gives the same card a
+// new LUID at the same PCI address (measured on an RTX 5060 whose driver was
+// re-added two minutes after the service started). The inventory loop sees
+// that as a detection that gains a statsKey and calls invalidate, and the next
+// poll re-resolves before joining. A detection that only loses one (the ~14 s
+// before the DirectX registry lists the new LUID) does not invalidate, so the
+// reading stays on the row that still exists. Separately, a reading can arrive
+// for an address the map does not know at all — the driver was not ready when
+// the poller started, or an adapter appeared later (hot-plug, or a GPU
+// recovered by the inventory retry) — and one re-resolve per poll covers that
+// without re-enumerating DXGI on every tick.
 func (p *gpuTempPoller) poll() {
 	if p.unavailable.Load() {
 		return
+	}
+	reResolved := false
+	if p.remap.Swap(false) {
+		reResolved = true
+		p.byAddress = p.resolveAddresses()
 	}
 	sensors, err := p.query()
 	if err != nil {
@@ -323,12 +353,11 @@ func (p *gpuTempPoller) poll() {
 		slog.Info("nvidia-smi answering again; GPU temperature, power draw and NVML utilization restored")
 	}
 	byLUID := make(map[string]gpuSensorSample, len(sensors))
-	reResolved := false
 	for addr, sample := range sensors {
 		luid, ok := p.byAddress[addr]
 		if !ok && !reResolved {
 			reResolved = true
-			p.byAddress = luidsByPCIAddress()
+			p.byAddress = p.resolveAddresses()
 			luid, ok = p.byAddress[addr]
 		}
 		if ok {
@@ -336,6 +365,24 @@ func (p *gpuTempPoller) poll() {
 		}
 	}
 	p.latest.Store(&byLUID)
+}
+
+// resolveAddresses rebuilds the PCI address -> LUID key map.
+func (p *gpuTempPoller) resolveAddresses() map[string]string {
+	if p.resolve != nil {
+		return p.resolve()
+	}
+	return luidsByPCIAddress()
+}
+
+// invalidate tells the poller its address map may name LUIDs that no longer
+// exist; the next poll re-resolves it. Called by the inventory loop when a
+// detection gains a statsKey. Safe from any goroutine and on a nil poller.
+func (p *gpuTempPoller) invalidate() {
+	if p == nil {
+		return
+	}
+	p.remap.Store(true)
 }
 
 // mergeInto adds the latest readings to the snapshot's GPU map under their
