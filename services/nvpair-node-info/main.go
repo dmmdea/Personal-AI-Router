@@ -342,6 +342,11 @@ func mergeGPUInventory(static, recovered []GPUInfo, hardwareKeys map[string]stri
 			if index, same := byHardwareKey[gpu.hardwareKey]; same && !live[merged[index].statsKey] {
 				delete(byStatsKey, merged[index].statsKey)
 				merged[index].statsKey = gpu.statsKey
+				// The row now describes the adapter found at that address. A
+				// different card in the same slot (an eGPU swapped on one
+				// port) must not keep the old card's name and memory.
+				merged[index].Name = cmp.Or(gpu.Name, merged[index].Name)
+				merged[index].VramBytes = cmp.Or(gpu.VramBytes, merged[index].VramBytes)
 				byStatsKey[gpu.statsKey] = index
 			}
 		}

@@ -57,6 +57,10 @@ func TestRegistryLagAfterDriverReaddKeepsTemperatureOnStartupRow(t *testing.T) {
 	c.startGPUInventory()
 	t.Cleanup(func() { close(c.stop); c.wg.Wait() })
 	waitForStats(t, "the startup inventory", func() bool { return len(c.Snapshot().GPUInventory) == 2 })
+	// The first publish always invalidates (it gains every key), and the loop
+	// stores the inventory before it calls invalidate(): wait for that call to
+	// land, or a late one re-sets the flag this test just cleared.
+	waitForStats(t, "the first-publish invalidate", c.gpuTemps.remap.Load)
 	c.gpuTemps.remap.Store(false)
 	stage.Store(1)
 	waitForStats(t, "the registry-lag publish", func() bool { return len(c.Snapshot().GPUInventory) == 1 })

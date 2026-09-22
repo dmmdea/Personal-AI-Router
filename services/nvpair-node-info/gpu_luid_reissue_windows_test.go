@@ -79,6 +79,10 @@ func TestWindowsCollectorInvalidatesTempJoinOnChangedSet(t *testing.T) {
 	t.Cleanup(func() { close(c.stop); c.wg.Wait() })
 
 	waitForStats(t, "the startup inventory", func() bool { return len(c.Snapshot().GPUInventory) == 1 })
+	// The first publish always invalidates (it gains every key), and the loop
+	// stores the inventory before it calls invalidate(): wait for that call to
+	// land, or a late one re-sets the flag this test just cleared.
+	waitForStats(t, "the first-publish invalidate", c.gpuTemps.remap.Load)
 	c.gpuTemps.remap.Store(false)
 	settled := calls.Load() + 3
 	waitForStats(t, "three unchanged detections", func() bool { return calls.Load() >= settled })
@@ -182,6 +186,10 @@ func TestReissuedLUIDFindsRowWhoseAddressWasUnreadableAtStartup(t *testing.T) {
 	t.Cleanup(func() { close(c.stop); c.wg.Wait() })
 
 	waitForStats(t, "the startup inventory", func() bool { return len(c.Snapshot().GPUInventory) == 1 })
+	// The first publish always invalidates (it gains every key), and the loop
+	// stores the inventory before it calls invalidate(): wait for that call to
+	// land, or a late one re-sets the flag this test just cleared.
+	waitForStats(t, "the first-publish invalidate", c.gpuTemps.remap.Load)
 	c.gpuTemps.remap.Store(false)
 	stage.Store(1)
 	settled := calls.Load() + 3
@@ -198,9 +206,8 @@ func TestReissuedLUIDFindsRowWhoseAddressWasUnreadableAtStartup(t *testing.T) {
 		inv := c.Snapshot().GPUInventory
 		return len(inv) == 1 && inv[0].statsKey == rtxNow.statsKey
 	})
-	if !c.gpuTemps.remap.Load() {
-		t.Error("the reissued LUID did not invalidate the temperature join")
-	}
+	// The inventory is stored before invalidate() runs; wait for it.
+	waitForStats(t, "the reissued LUID to invalidate the temperature join", c.gpuTemps.remap.Load)
 
 	snap := c.Snapshot()
 	snap.GPU = map[string]gpuStat{rtxNow.statsKey: {VRAMUsed: 422301696, TemperatureC: 56, PowerWatts: 19}}

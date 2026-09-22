@@ -75,6 +75,22 @@ func TestMergeGPUInventoryFollowsReissuedKey(t *testing.T) {
 // re-detected (a remoting clone that got past the registry gate) must not
 // steal the live row's key — that would move the real card's readings onto
 // the clone. It is appended, exactly as before the reissue rule existed.
+// TestMergeGPUInventoryMovedRowTakesRedetectedIdentity: when the row moves to
+// the adapter now found at its address, it shows that adapter's name and
+// memory — a different card in the same slot is not reported as the old one.
+func TestMergeGPUInventoryMovedRowTakesRedetectedIdentity(t *testing.T) {
+	boot := GPUInfo{Name: "NVIDIA GeForce RTX 5060", VramBytes: 8 << 30, statsKey: "luid_A", hardwareKey: "pci:04:00.0"}
+	swapped := GPUInfo{Name: "NVIDIA GeForce RTX 5070", VramBytes: 12 << 30, statsKey: "luid_B", hardwareKey: "pci:04:00.0"}
+
+	got := mergeGPUInventory([]GPUInfo{boot}, []GPUInfo{swapped}, nil)
+	if len(got) != 1 {
+		t.Fatalf("merged %d rows, want 1: %+v", len(got), mergeRows(got))
+	}
+	if got[0].statsKey != "luid_B" || got[0].Name != swapped.Name || got[0].VramBytes != swapped.VramBytes {
+		t.Fatalf("moved row = {%q %q %d}, want {luid_B %q %d}", got[0].statsKey, got[0].Name, got[0].VramBytes, swapped.Name, swapped.VramBytes)
+	}
+}
+
 func TestMergeGPUInventoryKeepsTwoLiveAdaptersAtOneAddress(t *testing.T) {
 	card := GPUInfo{Name: "NVIDIA GeForce RTX 5080", statsKey: "luid_A", hardwareKey: "pci:01:00.0"}
 	clone := GPUInfo{Name: "NVIDIA GeForce RTX 5080", statsKey: "luid_R", hardwareKey: "pci:01:00.0"}
