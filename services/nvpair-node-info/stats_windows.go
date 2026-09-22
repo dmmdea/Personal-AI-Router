@@ -633,17 +633,30 @@ func (c *statsCollector) decodeCPU() uint32 {
 // differentiate "zero used" (an unrealistic but valid reading) from
 // "we don't know" in a future refactor.
 func readMemoryUsed() (uint64, bool) {
+	ms, ok := readMemoryStatus()
+	if !ok || ms.AvailPhys > ms.TotalPhys {
+		return 0, false
+	}
+	return ms.TotalPhys - ms.AvailPhys, true
+}
+
+// readMemoryStatus is the one GlobalMemoryStatusEx call both halves of the
+// memory readout come from: detectMemoryTotal publishes its TotalPhys and
+// readMemoryUsed subtracts AvailPhys from that same field, so the two are on
+// one base (see systemMemTotal in memory_detect.go). ok is false when the call
+// fails or reports no physical memory.
+func readMemoryStatus() (memoryStatusEx, bool) {
 	var ms memoryStatusEx
 	ms.Length = uint32(unsafe.Sizeof(ms))
 	r, _, err := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&ms)))
 	if r == 0 {
 		slog.Debug("GlobalMemoryStatusEx failed", "err", err)
-		return 0, false
+		return memoryStatusEx{}, false
 	}
-	if ms.TotalPhys == 0 || ms.AvailPhys > ms.TotalPhys {
-		return 0, false
+	if ms.TotalPhys == 0 {
+		return memoryStatusEx{}, false
 	}
-	return ms.TotalPhys - ms.AvailPhys, true
+	return ms, true
 }
 
 // readCounterLarge pulls the PDH_FMT_LARGE payload for each instance of

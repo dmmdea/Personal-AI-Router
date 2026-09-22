@@ -22,7 +22,7 @@ import NodePerformance from './NodePerformance'
 import NodeChartLegend from './NodeChartLegend'
 import { buildRadialChartMetrics } from '@/ui/utils/build-radial-chart-metrics'
 import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-inference'
-import { memoryUsedBytes } from '@/ui/utils/hardware-rows'
+import { memoryUsedBytes, usagePercent } from '@/ui/utils/hardware-rows'
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeEngineSettings from './NodeEngineSettings'
 
@@ -78,11 +78,12 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
         // inference-ready so the legend mirrors the radial rings exactly.
         return node.topology.gpus.flatMap((gpu, index) => {
             if (!isGpuInferenceReady(gpu, node.topology.inferenceHardwareIds)) return []
-            const gpuUtilData = nodeMetrics?.gpuUtilization[index]
             // By id, not by index: the bridge emits no VRAM series for a
-            // shared-pool row the node could not measure, so this array no
-            // longer lines up with topology.gpus and positional lookup would
-            // hand one GPU's memory usage to the next one along.
+            // shared-pool row the node could not measure, and no utilization
+            // series for a row with no busy counter, so neither array lines up
+            // with topology.gpus and positional lookup would hand one GPU's
+            // figures to the next one along.
+            const gpuUtilData = nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)
             const gpuVramData = nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)
 
             return [
@@ -94,7 +95,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                         gpu,
                         gpuVramData ? getLatestValue(gpuVramData.data) : null
                     ),
-                    usage: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
+                    usage: usagePercent(gpu, gpuUtilData ? getLatestValue(gpuUtilData.data) : null),
                     usageColor: getGpuColor(index),
                     vramColor: getVramColor(index),
                     temperature: nodeMetrics?.gpuTemperature.find(t => t.id === gpu.id)?.value ?? 0,

@@ -3,7 +3,7 @@
 
 import type { NodeItem } from '@/shared/types/nodes'
 import type { NodeMetricsHistory } from '@/ui/stores/metrics.store'
-import { hasInferenceReadyGpu } from '@/ui/utils/gpu-inference'
+import { isGpuInferenceReady } from '@/ui/utils/gpu-inference'
 
 /**
  * Node chart / activity ring rendering gate.
@@ -18,9 +18,17 @@ import { hasInferenceReadyGpu } from '@/ui/utils/gpu-inference'
  * the backend marks not-inference-ready (and therefore renders the CPU fallback
  * as its final state) does not needlessly wait for a GPU metric it will never
  * display. See gpu-inference.ts.
+ *
+ * Only a GPU that has a busy counter is waited for: the bridge emits no
+ * utilization series for a row the node flags `utilizationUnavailable`, so a
+ * node whose ready GPUs are all such rows would otherwise never chart at all.
  */
 export function hasFirstMetrics(node: NodeItem, metrics?: NodeMetricsHistory): boolean {
     if (!metrics) return false
-    if (hasInferenceReadyGpu(node.topology) && metrics.gpuUtilization.length === 0) return false
+    const { gpus, inferenceHardwareIds } = node.topology
+    const awaitsUtilization = gpus.some(
+        gpu => isGpuInferenceReady(gpu, inferenceHardwareIds) && !gpu.utilizationUnavailable
+    )
+    if (awaitsUtilization && metrics.gpuUtilization.length === 0) return false
     return true
 }

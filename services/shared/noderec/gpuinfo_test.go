@@ -212,3 +212,30 @@ func TestPowerWattsWireShape(t *testing.T) {
 		t.Fatalf("CPUInfo.PowerWatts = %v, want 140 after a round trip", backCPU.PowerWatts)
 	}
 }
+
+// TestGPUInfoUtilizationAndReadinessMarkers pins the two per-row markers the
+// relays carry: utilization_unavailable is present only when set, and
+// inference_ready is present only when a node said it (so absent keeps its
+// historical "no claim" meaning, and an explicit false survives the trip).
+func TestGPUInfoUtilizationAndReadinessMarkers(t *testing.T) {
+	const body = `[{"name":"Hailo-8L AI Accelerator","kind":"npu","utilization_unavailable":true,"inference_ready":false},` +
+		`{"name":"NVIDIA GeForce RTX 5060","vram_bytes":8279556096}]`
+	var rows []GPUInfo
+	if err := json.Unmarshal([]byte(body), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !rows[0].UtilizationUnavailable || rows[0].InferenceReady == nil || *rows[0].InferenceReady {
+		t.Fatalf("accelerator row = %+v, want utilization_unavailable and inference_ready=false", rows[0])
+	}
+	if rows[1].UtilizationUnavailable || rows[1].InferenceReady != nil {
+		t.Fatalf("GPU row = %+v, want neither marker", rows[1])
+	}
+	out, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if strings.Count(string(out), `"utilization_unavailable":true`) != 1 ||
+		strings.Count(string(out), `"inference_ready":false`) != 1 {
+		t.Fatalf("re-marshal lost or grew a marker: %s", out)
+	}
+}

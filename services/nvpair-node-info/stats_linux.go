@@ -185,7 +185,13 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if t, ok := c.cpuTemp.read(); ok {
 		snap.CPUTempC = t
 	}
-	if w, ok := c.cpuPower.read(time.Now()); ok {
+	if c.cpuPower.path != "" {
+		if w, ok := c.cpuPower.read(time.Now()); ok {
+			snap.CPUPowerWatts = w
+		}
+	} else if w, ok := amdAPUPackageWatts(drmClassDir); ok {
+		// No readable RAPL counter: an AMD APU's SMU still meters the package,
+		// unprivileged (stats_amd_linux.go).
 		snap.CPUPowerWatts = w
 	}
 

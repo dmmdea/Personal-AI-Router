@@ -143,13 +143,17 @@ func TestAccelSamplerCounterReset(t *testing.T) {
 }
 
 func TestDetectAcceleratorsRowShape(t *testing.T) {
-	row := GPUInfo{
-		Name:     apexProductName("0x1ac1", "0x089a"),
-		Kind:     noderec.GPUKindAccelerator,
-		statsKey: accelStatsKey("apex_0"),
+	row := apexRow(apexProductName("0x1ac1", "0x089a"), "apex_0")
+	if row.statsKey != "apex:apex_0" || row.Kind != noderec.GPUKindAccelerator {
+		t.Fatalf("row = %+v", row)
 	}
-	if row.statsKey != "apex:apex_0" {
-		t.Fatalf("statsKey = %q", row.statsKey)
+	// The Edge TPU's busy figure is measured, so it must not be flagged as
+	// having no source; it is not a device any engine runs on.
+	if row.UtilizationUnavailable {
+		t.Error("UtilizationUnavailable set on an Edge TPU: its interrupt-count utilization is a measurement")
+	}
+	if row.InferenceReady == nil || *row.InferenceReady {
+		t.Errorf("InferenceReady = %v, want an explicit false", row.InferenceReady)
 	}
 	if noderec.MaxGPUUtilization([]noderec.GPUInfo{{Kind: row.Kind, UtilizationPercent: 100}}) != 0 {
 		t.Fatal("an accelerator row must not contribute to GPU pressure")

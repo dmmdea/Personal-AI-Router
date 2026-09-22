@@ -14,9 +14,10 @@ import (
 // static detectGPUs() output. Both fields are zero when the underlying OS
 // counter is unavailable; upstream code maps zeros back to "omit from JSON"
 // via the omitempty tags on GPUInfo, so clients see a missing field rather
-// than a misleading literal zero. The residual ambiguity for UtilizationPct
-// (0 could mean "GPU is actually idle" or "we couldn't read") is benign
-// because the two cases are visually identical to a user.
+// than a misleading literal zero. That leaves UtilizationPct's absent field
+// meaning either "idle" or "could not read", which a client renders the same
+// way; a row that has no source at all says so with
+// GPUInfo.UtilizationUnavailable instead of relying on the absence.
 type gpuStat struct {
 	VRAMUsed       uint64
 	UtilizationPct uint32
@@ -28,6 +29,11 @@ type gpuStat struct {
 	// the omitempty tag on GPUInfo.PowerWatts turns that back into an absent
 	// field rather than a device that claims to draw nothing.
 	PowerWatts float64
+	// UtilizationKnown is true when UtilizationPct is a reading rather than
+	// the zero value. Only the Rockchip samplers set it, and it is consulted
+	// only for the rows they feed (GPUInfo.utilizationNeedsSample); every other
+	// source publishes a stat only when it read something.
+	UtilizationKnown bool
 }
 
 // statsSnapshot is the dynamic bundle the HTTP handler reads without locking.

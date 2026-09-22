@@ -10,7 +10,9 @@ export type GpuInfo = {
     // for it — a shared-pool device whose driver counts nothing. The memory
     // line then shows the ceiling alone; see ui/utils/hardware-rows.ts.
     vramUsedBytes: number | null
-    usage: number // percentage
+    // Percentage, or null when the node says the device has no busy counter
+    // (see usagePercent in ui/utils/hardware-rows.ts); rendered as "—".
+    usage: number | null
     usageColor: string
     vramColor: string
     temperature: number // degrees Celsius, 0 = no reading

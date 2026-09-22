@@ -36,12 +36,14 @@ export function buildRadialChartMetrics(
         ]
     }
 
-    // Keep the original GPU index (colors and the utilization series are keyed
-    // positionally to topology.gpus) but omit the rings for any GPU the backend
-    // did not mark inference-ready (when it sends a readiness list).
+    // Keep the original GPU index (colors are keyed positionally to
+    // topology.gpus) but omit the rings for any GPU the backend did not mark
+    // inference-ready (when it sends a readiness list).
     return topology.gpus.flatMap((gpu, gpuIdx) => {
         if (!isGpuInferenceReady(gpu, topology.inferenceHardwareIds)) return []
-        const gpuUtil = nodeMetrics?.gpuUtilization[gpuIdx]
+        // By id: the bridge emits no utilization series for a row with no busy
+        // counter, so the array no longer lines up with topology.gpus.
+        const gpuUtil = nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)
         // The VRAM series is looked up by id, because the bridge emits none for
         // a shared-pool row the node could not measure and the array therefore
         // no longer lines up with topology.gpus. A ring for a row with no
@@ -49,13 +51,17 @@ export function buildRadialChartMetrics(
         // reads as "this GPU is holding nothing", which is a reading the node
         // never took.
         const gpuVram = nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)
-        const rings: RadialMetric[] = [
-            {
-                value: gpuUtil ? getLatest(gpuUtil.data) : 0,
-                color: getGpuColor(gpuIdx),
-                shown: true
-            }
-        ]
+        // No usage ring for a device with no busy counter: an empty arc reads
+        // as an idle GPU, which is a reading nobody took.
+        const rings: RadialMetric[] = gpu.utilizationUnavailable
+            ? []
+            : [
+                  {
+                      value: gpuUtil ? getLatest(gpuUtil.data) : 0,
+                      color: getGpuColor(gpuIdx),
+                      shown: true
+                  }
+              ]
         if (gpuVram || !isUnifiedMemory(gpu)) {
             rings.push({
                 value: gpuVram ? getLatest(gpuVram.data) : 0,

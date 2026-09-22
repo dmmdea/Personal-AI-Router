@@ -587,19 +587,11 @@ func hailoPresenceAccelerators(list subKeyLister) []GPUInfo {
 		instances, err := list(pciEnumKey + `\` + deviceKey)
 		if err != nil || len(instances) == 0 {
 			// The device key alone is evidence of one function.
-			out = append(out, GPUInfo{
-				Name:     name,
-				Kind:     noderec.GPUKindAccelerator,
-				statsKey: hailoStatsKey("pnp:" + deviceKey),
-			})
+			out = append(out, hailoRow(name, hailoStatsKey("pnp:"+deviceKey)))
 			continue
 		}
 		for _, instance := range instances {
-			out = append(out, GPUInfo{
-				Name:     name,
-				Kind:     noderec.GPUKindAccelerator,
-				statsKey: hailoStatsKey("pnp:" + deviceKey + `\` + instance),
-			})
+			out = append(out, hailoRow(name, hailoStatsKey("pnp:"+deviceKey+`\`+instance)))
 		}
 	}
 	return out
@@ -650,13 +642,23 @@ func (l *hailoLib) acceleratorRows(ids []string, list subKeyLister) []GPUInfo {
 				name = pnp[0].Name
 			}
 		}
-		out = append(out, GPUInfo{
-			Name:     name,
-			Kind:     noderec.GPUKindAccelerator,
-			statsKey: hailoStatsKey(id),
-		})
+		out = append(out, hailoRow(name, hailoStatsKey(id)))
 	}
 	return out
+}
+
+// hailoRow is one Hailo module's inventory row, whichever path found it. The
+// row says outright that it has no utilization source (HailoRT exposes no busy
+// counter on Windows, see the top of this file) and that no engine can use it,
+// so a client renders neither an invented "0 %" nor an inference device.
+func hailoRow(name, statsKey string) GPUInfo {
+	return GPUInfo{
+		Name:                   name,
+		Kind:                   noderec.GPUKindAccelerator,
+		UtilizationUnavailable: true,
+		InferenceReady:         notInferenceReady(),
+		statsKey:               statsKey,
+	}
 }
 
 // deviceArchitecture opens one device just long enough to identify it. The

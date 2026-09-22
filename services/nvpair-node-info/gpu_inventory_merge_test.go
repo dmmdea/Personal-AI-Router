@@ -89,6 +89,19 @@ func TestMergeGPUInventoryMovedRowTakesRedetectedIdentity(t *testing.T) {
 	if got[0].statsKey != "luid_B" || got[0].Name != swapped.Name || got[0].VramBytes != swapped.VramBytes {
 		t.Fatalf("moved row = {%q %q %d}, want {luid_B %q %d}", got[0].statsKey, got[0].Name, got[0].VramBytes, swapped.Name, swapped.VramBytes)
 	}
+
+	// The capacity's meaning moves with it: an integrated adapter's pool
+	// ceiling and its no-used-figure rule come along, and a discrete card that
+	// replaces one drops them.
+	igpu := GPUInfo{Name: "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", VramBytes: 64 << 30, MemoryPool: "unified", sharedUsageUnmeasured: true, statsKey: "luid_C", hardwareKey: "pci:00:02.0"}
+	got = mergeGPUInventory([]GPUInfo{boot}, []GPUInfo{{Name: igpu.Name, VramBytes: igpu.VramBytes, MemoryPool: igpu.MemoryPool, sharedUsageUnmeasured: true, statsKey: "luid_D", hardwareKey: "pci:04:00.0"}}, nil)
+	if got[0].MemoryPool != "unified" || !got[0].sharedUsageUnmeasured {
+		t.Errorf("row moved onto an integrated adapter = %+v, want its unified pool", got[0])
+	}
+	got = mergeGPUInventory([]GPUInfo{igpu}, []GPUInfo{{Name: swapped.Name, VramBytes: swapped.VramBytes, statsKey: "luid_E", hardwareKey: "pci:00:02.0"}}, nil)
+	if got[0].MemoryPool != "" || got[0].sharedUsageUnmeasured {
+		t.Errorf("row moved onto a discrete card = %+v, want no pool marker", got[0])
+	}
 }
 
 func TestMergeGPUInventoryKeepsTwoLiveAdaptersAtOneAddress(t *testing.T) {

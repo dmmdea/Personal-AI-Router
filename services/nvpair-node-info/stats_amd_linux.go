@@ -34,9 +34,13 @@ import (
 //     matching the capacity rule so used never exceeds total.
 //   - temperature: the amdgpu hwmon's edge sensor (temp*_input, millidegrees).
 //   - power: the same hwmon's power1_input, the average socket power the SMU
-//     reports (labelled PPT — package power tracking). It is in microwatts,
-//     and on an APU it covers the whole package, CPU cores included, which is
-//     what "the GPU is drawing" means on a part with no separate rail.
+//     reports (labelled PPT — package power tracking), in microwatts. On a
+//     discrete card that is the card. On an APU it is the whole package, CPU
+//     cores included, so it is published on the CPU row (the package power
+//     cpu.power_watts documents, which is where an Intel host's package
+//     figure sits) rather than as the GPU's draw, and the APU's GPU row
+//     carries no watts, as an Intel iGPU row carries none. See
+//     amdAPUPackageWatts.
 //
 // A host without amdgpu costs one os.ReadDir of /sys/class/drm per tick and
 // logs nothing at all; a host without /sys/class/drm logs a single Debug line
@@ -102,9 +106,13 @@ func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
 			stat.TemperatureC = temp
 			any = true
 		}
-		if watts, ok := amdPowerWatts(c.deviceDir); ok {
-			stat.PowerWatts = watts
-			any = true
+		// An APU's PPT is the package, not the GPU: amdAPUPackageWatts puts
+		// it on the CPU row instead.
+		if !c.unifiedPool {
+			if watts, ok := amdPowerWatts(c.deviceDir); ok {
+				stat.PowerWatts = watts
+				any = true
+			}
 		}
 		if any {
 			out[c.statsKey] = stat
@@ -200,6 +208,31 @@ func amdHwmonDirs(deviceDir string) []string {
 	return paths
 }
 
+// amdAPUPackageWatts is an APU's package power in whole watts: the PPT input of
+// the first unified-pool amdgpu card under drmRoot. ok is false on a host with
+// no APU or whose APU publishes no power input.
+//
+// The collector publishes it as cpu.power_watts when the host has no readable
+// RAPL package counter — the ordinary case, since the kernel keeps energy_uj
+// root-only. The SMU's socket average and the RAPL package domain measure the
+// same thing: on a Barcelo APU they agreed within a watt (PPT mean 25 W, RAPL
+// package-0 24.8-25.3 W over the same windows). Publishing it on the GPU row
+// instead showed CPU-bound work as GPU draw and left the CPU row blank.
+//
+// The GPU's own share of the package is not published: the SMU's gpu_metrics
+// table splits the socket into rails, but the graphics rail is shared with the
+// CPU cores on these parts and the per-core power unit has not been calibrated
+// against RAPL, so a subtraction would be a guess.
+func amdAPUPackageWatts(drmRoot string) (float64, bool) {
+	for _, c := range listAMDCards(drmRoot) {
+		if !c.unifiedPool {
+			continue
+		}
+		return amdPowerWatts(c.deviceDir)
+	}
+	return 0, false
+}
+
 // amdPowerWatts returns the card's socket power in whole watts, from the
 // amdgpu hwmon's power1_input (microwatts).
 //
@@ -210,9 +243,8 @@ func amdHwmonDirs(deviceDir string) []string {
 // figure instead of reporting a card that draws nothing.
 //
 // On an APU this is package power: the CPU cores and the GPU share one socket
-// and one budget, and the SMU meters the socket. That is the honest answer for
-// the GPU row on such a part, not a defect — there is no separate GPU rail to
-// report.
+// and one budget, and the SMU meters the socket. That is why an APU's reading
+// goes to the CPU row (amdAPUPackageWatts) and not to its GPU row.
 func amdPowerWatts(deviceDir string) (float64, bool) {
 	fallback := ""
 	for _, hwmonDir := range amdHwmonDirs(deviceDir) {

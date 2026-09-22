@@ -702,9 +702,18 @@ func TestLiveAMDGPUsOnThisHost(t *testing.T) {
 			t.Errorf("TemperatureC = 0, want a real edge reading")
 		}
 		// amdgpu registers power1_input on every part this service runs on.
-		// A zero here means the hwmon walk missed it, not that the socket is
-		// drawing nothing — an idling APU still reads the high teens.
-		if stat.PowerWatts == 0 {
+		// A discrete card carries it; an APU's is the package and belongs to
+		// the CPU row instead. A zero where one is expected means the hwmon
+		// walk missed it, not that the socket is drawing nothing — an idling
+		// APU still reads the high teens.
+		if gpu.MemoryPool == noderec.GPUMemoryPoolUnified {
+			if stat.PowerWatts != 0 {
+				t.Errorf("APU GPU row PowerWatts = %v, want none: the PPT input is package power", stat.PowerWatts)
+			}
+			if watts, ok := amdAPUPackageWatts(drmClassDir); !ok || watts == 0 {
+				t.Errorf("amdAPUPackageWatts = %v, %v; want the package PPT reading", watts, ok)
+			}
+		} else if stat.PowerWatts == 0 {
 			t.Errorf("PowerWatts = 0, want the hwmon PPT reading")
 		}
 		if stat.VRAMUsed == 0 {
@@ -792,18 +801,40 @@ func TestAMDPowerUnavailable(t *testing.T) {
 	}
 }
 
+// discreteAMDAttrs is a discrete Radeon: dedicated VRAM well past the APU
+// carve-out ceiling, so its PPT input is the card's own draw.
+func discreteAMDAttrs(overrides map[string]string) map[string]string {
+	attrs := map[string]string{
+		"vendor":              "0x1002",
+		"device":              "0x73bf", // Navi 21, not in amdModels
+		"mem_info_vram_total": "17163091968",
+		"mem_info_vram_used":  "1073741824",
+		"mem_info_gtt_total":  "8589934592",
+		"gpu_busy_percent":    "0",
+	}
+	for k, v := range overrides {
+		attrs[k] = v
+	}
+	return attrs
+}
+
 // TestDecodeAMDCarriesPower folds the reading into the sample map the way the
 // collector does, and pins that a card reporting ONLY power still reaches the
 // map: the "any" gate exists so a card with no busy counter is not dropped
-// along with its wattage.
+// along with its wattage. Both cards are discrete; an APU's reading is the
+// package's and is covered by TestAMDAPUPowerIsPackagePower.
 func TestDecodeAMDCarriesPower(t *testing.T) {
 	f := newAMDFakeTree(t)
-	full := f.addCard("card1", "0000:04:00.0", apuAttrs(map[string]string{"gpu_busy_percent": "13"}))
+	full := f.addCard("card1", "0000:04:00.0", discreteAMDAttrs(map[string]string{"gpu_busy_percent": "13"}))
 	f.addHwmon(full, "hwmon2", map[string]string{
 		"name": "amdgpu", "temp1_input": "52000", "temp1_label": "edge",
 		"power1_input": "19000000", "power1_label": "PPT",
 	})
-	powerOnly := f.addCard("card2", "0000:05:00.0", apuAttrs(nil))
+	powerOnly := f.addCard("card2", "0000:05:00.0", map[string]string{
+		"vendor":              "0x1002",
+		"device":              "0x73bf",
+		"mem_info_vram_total": "17163091968",
+	})
 	f.addHwmon(powerOnly, "hwmon3", map[string]string{
 		"name": "amdgpu", "power1_input": "8000000", "power1_label": "PPT",
 	})
@@ -848,5 +879,46 @@ func TestMicrowattsToWatts(t *testing.T) {
 		if got != c.want || ok != c.wantO {
 			t.Errorf("microwattsToWatts(%q) = %v, %v; want %v, %v", c.in, got, ok, c.want, c.wantO)
 		}
+	}
+}
+
+// TestAMDAPUPowerIsPackagePower pins where an APU's PPT reading goes. The SMU
+// meters the socket, CPU cores included, so the figure is the package's: it
+// must not appear as the GPU row's draw (a CPU-bound load would show up as GPU
+// power), and amdAPUPackageWatts must hand it to the CPU row. A discrete card
+// on the same host keeps its own reading and is never taken for the package.
+func TestAMDAPUPowerIsPackagePower(t *testing.T) {
+	f := newAMDFakeTree(t)
+	dgpu := f.addCard("card0", "0000:03:00.0", discreteAMDAttrs(nil))
+	f.addHwmon(dgpu, "hwmon1", map[string]string{
+		"name": "amdgpu", "power1_input": "180000000", "power1_label": "PPT",
+	})
+	apu := f.addCard("card1", "0000:05:00.0", apuAttrs(map[string]string{"gpu_busy_percent": "99"}))
+	f.addHwmon(apu, "hwmon3", map[string]string{
+		"name": "amdgpu", "temp1_input": "61000", "temp1_label": "edge",
+		"power1_input": "25400000", "power1_label": "PPT",
+	})
+
+	out := map[string]gpuStat{}
+	if !decodeAMD(f.drmRoot, out) {
+		t.Fatal("decodeAMD reported no sample")
+	}
+	if got := out["amd:0000:05:00.0"]; got.PowerWatts != 0 || got.UtilizationPct != 99 || got.TemperatureC != 61 {
+		t.Errorf("APU sample = %+v, want 99%% / 61 C and no watts", got)
+	}
+	if got := out["amd:0000:03:00.0"]; got.PowerWatts != 180 {
+		t.Errorf("discrete sample = %+v, want its own 180 W", got)
+	}
+	if watts, ok := amdAPUPackageWatts(f.drmRoot); !ok || watts != 25 {
+		t.Errorf("amdAPUPackageWatts = %v, %v; want 25, true (the APU's PPT, not the discrete card's)", watts, ok)
+	}
+
+	discreteOnly := newAMDFakeTree(t)
+	only := discreteOnly.addCard("card0", "0000:03:00.0", discreteAMDAttrs(nil))
+	discreteOnly.addHwmon(only, "hwmon1", map[string]string{
+		"name": "amdgpu", "power1_input": "180000000", "power1_label": "PPT",
+	})
+	if watts, ok := amdAPUPackageWatts(discreteOnly.drmRoot); ok {
+		t.Errorf("amdAPUPackageWatts on a discrete-only host = %v, true; want none", watts)
 	}
 }
