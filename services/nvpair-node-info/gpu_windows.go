@@ -266,6 +266,12 @@ type adapterCandidate struct {
 	// kept so a row whose name came from the shared table can still be traced
 	// back to the driver string it replaced.
 	dxgiDescription string
+
+	// pciAddress is the "bb:dd.f" the display driver reports behind this LUID
+	// (adapterAddressForLuid), empty when it reports none. It is resolved once
+	// here so the row's hardwareKey and the temperature join's address map
+	// come from the same answer.
+	pciAddress string
 }
 
 // One-shot warning latches. Adapter detection now re-runs on a timer
@@ -401,12 +407,22 @@ func enumerateAdapterCandidates() []adapterCandidate {
 				"device_id", fmt.Sprintf("0x%04x", desc.DeviceID))
 		}
 
+		// The PCI address is the card's identity across a driver restart,
+		// which reissues its LUID (GPUInfo.hardwareKey).
+		pciAddress, _ := adapterAddressForLuid(desc.AdapterLuidLow, desc.AdapterLuidHigh)
+		hardwareKey := ""
+		if pciAddress != "" {
+			hardwareKey = "pci:" + pciAddress
+		}
+
 		candidates = append(candidates, adapterCandidate{
 			gpu: GPUInfo{
-				Name:      name,
-				VramBytes: uint64(desc.DedicatedVideoMemory),
-				statsKey:  luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh),
+				Name:        name,
+				VramBytes:   uint64(desc.DedicatedVideoMemory),
+				statsKey:    luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh),
+				hardwareKey: hardwareKey,
 			},
+			pciAddress:      pciAddress,
 			luid:            luidUint64(desc.AdapterLuidLow, desc.AdapterLuidHigh),
 			luidLow:         desc.AdapterLuidLow,
 			luidHigh:        desc.AdapterLuidHigh,
