@@ -6,7 +6,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"reflect"
 	"testing"
 	"time"
@@ -105,7 +107,77 @@ func TestGPUTempPollerMergeInto(t *testing.T) {
 	if kept.GPU["luid_c"] != (gpuStat{TemperatureC: 57, PowerWatts: 90}) {
 		t.Fatalf("luid_c = %+v, want the earlier wattage kept", kept.GPU["luid_c"])
 	}
+
+	// Utilization is the busier of the two sources. PDH's engine counters do
+	// not see CUDA work submitted from WSL2 (vLLM, llama.cpp under WSL), so a
+	// card NVML reports at 100 % reads as ~0 % through PDH alone; a game on
+	// the 3D engine reads fine through PDH either way.
+	util := &statsSnapshot{GPU: map[string]gpuStat{
+		"luid_d": {UtilizationPct: 3},
+		"luid_e": {UtilizationPct: 80},
+	}}
+	busy := map[string]gpuSensorSample{
+		"luid_d": {UtilizationPct: 100},
+		"luid_e": {UtilizationPct: 20},
+	}
+	p.latest.Store(&busy)
+	p.mergeInto(util)
+	if util.GPU["luid_d"].UtilizationPct != 100 || util.GPU["luid_e"].UtilizationPct != 80 {
+		t.Fatalf("utilization = %+v, want max(PDH, NVML) per card", util.GPU)
+	}
 }
+
+// TestGPUTempPollerFailureDoesNotFreeze pins the defect that froze a Qube
+// card's wattage on the operator's screen: one nvidia-smi timeout under load
+// latched the poller off for the process lifetime while mergeInto kept serving
+// the last sample. A transient failure must drop the readings (the field goes
+// absent instead of lying) and the next successful poll must bring them back;
+// only a host with no nvidia-smi at all latches off.
+func TestGPUTempPollerFailureDoesNotFreeze(t *testing.T) {
+	var result map[string]gpuSensorSample
+	var err error
+	p := &gpuTempPoller{
+		byAddress: map[string]string{"17:00.0": "luid_a"},
+		query:     func() (map[string]gpuSensorSample, error) { return result, err },
+	}
+	merged := func() gpuStat {
+		snap := &statsSnapshot{}
+		p.mergeInto(snap)
+		return snap.GPU["luid_a"]
+	}
+
+	result = map[string]gpuSensorSample{"17:00.0": {TemperatureC: 50, PowerWatts: 51, UtilizationPct: 99}}
+	p.poll()
+	if got := merged(); got.PowerWatts != 51 {
+		t.Fatalf("first poll = %+v", got)
+	}
+
+	result, err = nil, errDeadlineExceeded
+	p.poll()
+	if got := merged(); got != (gpuStat{}) {
+		t.Fatalf("after a timeout the stale sample is still served: %+v", got)
+	}
+	if p.unavailable.Load() {
+		t.Fatal("a timeout latched the poller off for good")
+	}
+
+	result, err = map[string]gpuSensorSample{"17:00.0": {TemperatureC: 70, PowerWatts: 240, UtilizationPct: 100}}, nil
+	p.poll()
+	if got := merged(); got.PowerWatts != 240 || got.TemperatureC != 70 {
+		t.Fatalf("recovery poll = %+v, want the fresh 240 W reading", got)
+	}
+
+	result, err = nil, &exec.Error{Name: "nvidia-smi", Err: exec.ErrNotFound}
+	p.poll()
+	if !p.unavailable.Load() {
+		t.Fatal("a missing nvidia-smi must latch the poller off")
+	}
+	if got := merged(); got != (gpuStat{}) {
+		t.Fatalf("latched poller still serves %+v", got)
+	}
+}
+
+var errDeadlineExceeded = errors.New("context deadline exceeded")
 
 // TestLuidsByPCIAddressLive runs only when NVPAIR_LIVE_GPU=1: on a real host
 // every nvidia-smi row must resolve to a distinct DXGI LUID through the
