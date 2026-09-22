@@ -48,15 +48,9 @@ type cpuSample struct {
 
 // cpuTempPoller owns the pipe reads and publishes those readings atomically.
 type cpuTempPoller struct {
-	read func() (hostsensors.Report, error)
-	// observe, when set, is handed every report this poller fetches,
-	// including the failures. One report carries every host sensor the
-	// helper reads, so the board row (board_windows.go) rides along on
-	// these reads instead of opening a second connection on its own timer.
-	// Called from the poll goroutine, which is its only caller.
-	observe func(hostsensors.Report, error)
-	now     func() time.Time
-	latest  atomic.Pointer[cpuSample]
+	read   func() (hostsensors.Report, error)
+	now    func() time.Time
+	latest atomic.Pointer[cpuSample]
 
 	// announced / lastNote belong to the poll goroutine: they keep the log
 	// to one line per state change instead of one per tick.
@@ -67,11 +61,10 @@ type cpuTempPoller struct {
 	done chan struct{}
 }
 
-func startCPUTempPoller(observe func(hostsensors.Report, error)) *cpuTempPoller {
+func startCPUTempPoller() *cpuTempPoller {
 	p := newCPUTempPoller(func() (hostsensors.Report, error) {
 		return hostsensors.Read(cpuTempDialTimeout)
 	}, time.Now)
-	p.observe = observe
 	go p.run()
 	return p
 }
@@ -112,9 +105,6 @@ func (p *cpuTempPoller) run() {
 // its companion is absent.
 func (p *cpuTempPoller) poll() bool {
 	r, err := p.read()
-	if p.observe != nil {
-		p.observe(r, err)
-	}
 	if err != nil {
 		p.latest.Store(&cpuSample{})
 		p.announced = false

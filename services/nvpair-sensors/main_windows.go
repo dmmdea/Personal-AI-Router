@@ -107,23 +107,6 @@ func main() {
 			PackageCelsius: c, PackageWatts: watts, TjMaxCelsius: s.tjMax(),
 			Source: sourceIntelMSR, SampledAt: time.Now().UTC(),
 		}}
-		// The board section is best-effort here exactly as it is in the
-		// service: a host without a supported Super I/O chip prints the CPU
-		// reading and a note on stderr, never a failure.
-		if b, err := openBoardSensor(); err != nil {
-			warn("no motherboard sensor readings: %v", err)
-		} else {
-			defer b.close()
-			if note := b.openNote(); note != "" {
-				warn("%s", note)
-			}
-			if reading, err := b.read(); err != nil {
-				warn("no motherboard sensor readings: %v", err)
-			} else {
-				reading.SampledAt = time.Now().UTC()
-				r.Board = &reading
-			}
-		}
 		if err := hostsensors.Encode(os.Stdout, r); err != nil {
 			fail("%v", err)
 		}
@@ -165,7 +148,7 @@ func main() {
 
 // runHelper samples until ctx ends and serves the latest report on the pipe.
 func runHelper(ctx context.Context, pipe string, interval time.Duration, log *slog.Logger) error {
-	s := startSampler(interval, log, openPackageSensor, openBoardSensor)
+	s := startSampler(interval, log, openPackageSensor)
 	defer s.Stop()
 	return servePipe(ctx, pipe, s.report, log)
 }

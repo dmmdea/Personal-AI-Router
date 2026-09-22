@@ -43,7 +43,7 @@ type GPUInfo struct {
 	// power.draw on an NVIDIA card (Linux and Windows alike) and the amdgpu
 	// hwmon PPT input on an AMD one. Zero — and so absent — on every device
 	// that has no meter: an integrated GPU, a Mali GPU, an RKNPU, an Edge TPU
-	// or Hailo module, the board row. See the ceilings table in README.md.
+	// or Hailo module. See the ceilings table in README.md.
 	PowerWatts float64 `json:"power_watts,omitempty"`
 	// MemoryPool is noderec.GPUMemoryPoolUnified on a device whose VramBytes
 	// is a pool it shares with the host (every integrated GPU, the Mali and

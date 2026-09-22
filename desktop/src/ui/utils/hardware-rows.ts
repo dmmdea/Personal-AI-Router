@@ -5,9 +5,8 @@
  * Which lines a hardware row in the node card is allowed to show.
  *
  * The inventory a node publishes is no longer only GPUs. It also carries
- * inference accelerators (`kind: "npu"`) and the host's motherboard controller
- * (`kind: "board"`), and each of those genuinely cannot report some of what a
- * GPU reports. A row that prints "Usage 0%" for a device with no busy counter
+ * inference accelerators (`kind: "npu"`), which genuinely cannot report some of
+ * what a GPU reports. A row that prints "Usage 0%" for a device with no busy counter
  * is not a neutral placeholder: it reads as "idle", which is a claim, and a
  * wrong one.
  *
@@ -28,7 +27,7 @@ import { formatBytes } from '@/ui/utils/formatters'
 
 /** The minimum shape both the legend and the performance panel share. */
 export interface HardwareRow {
-    /** "" or undefined for a GPU, "npu" for an accelerator, "board" for the motherboard. */
+    /** "" or undefined for a GPU, "npu" for an accelerator. */
     kind?: string
     /** Total VRAM in bytes; 0 for a device that has none. */
     vramTotal: number
@@ -39,32 +38,16 @@ export interface HardwareRow {
     memoryPool?: string
 }
 
-/** The motherboard controller row's kind, as node-info spells it. */
-export const KIND_BOARD = 'board'
-
 /** The inference-accelerator row's kind, as node-info spells it. */
 export const KIND_ACCELERATOR = 'npu'
 
 /**
- * Whether a row may show a Usage line.
- *
- * False for the motherboard controller: ASUS's TPU and EPU — and the
- * equivalents other vendors fit — publish no load or status interface, so
- * node-info deliberately sends no utilization_percent for that row and the UI
- * must not invent a zero for it.
- */
-export function showsUsage(row: HardwareRow): boolean {
-    return row.kind !== KIND_BOARD
-}
-
-/**
  * Whether a row may show a VRAM line.
  *
- * False for the motherboard controller, which has no memory at all, and for an
- * accelerator that reported none — that row would only ever read "0 B / 0 B".
+ * False for an accelerator that reported no memory — that row would only ever
+ * read "0 B / 0 B".
  */
 export function showsVram(row: HardwareRow): boolean {
-    if (row.kind === KIND_BOARD) return false
     return !(row.kind === KIND_ACCELERATOR && row.vramTotal === 0)
 }
 
@@ -91,8 +74,8 @@ export function memoryLabel(row: HardwareRow): string {
  * Whether a row shows a memory line at all, and — as a type predicate — that
  * the used figure passed in is a real number when it does.
  *
- * Two rules, in order. A device with no memory to speak of never had one: the
- * motherboard controller, and an accelerator that reported no capacity.
+ * Two rules, in order. A device with no memory to speak of never had one: an
+ * accelerator that reported no capacity.
  *
  * The second rule is newer, and it retires the "Shared <total>" line. A
  * shared-pool device that measures nothing — an Intel iGPU, a Mali GPU, an

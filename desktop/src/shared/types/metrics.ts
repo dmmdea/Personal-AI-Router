@@ -20,7 +20,7 @@ export interface NodeItemMetricsEntry {
     cpuTemperature?: number // degrees
     // Whole watts. 0 = nothing meters that device, which is most of a node's
     // inventory: node-info omits power_watts for an integrated GPU, a Mali
-    // GPU, an RKNPU, an Edge TPU and the board row, and for any CPU whose
+    // GPU, an RKNPU and an Edge TPU, and for any CPU whose
     // energy counter it cannot read. The UI shows no figure for a 0 rather
     // than "0 W", which would read as a device drawing nothing. Absent on
     // frames from a backend that predates the field.
