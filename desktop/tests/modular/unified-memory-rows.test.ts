@@ -202,7 +202,7 @@ describe('unified memory rows', () => {
         expect(memoryLabel(card)).toBe('VRAM')
 
         // The device-capability rule is unchanged: a shared pool is memory
-        // the device can really reach, unlike the board controller's.
+        // the device can really reach.
         expect(showsVram(igpu)).toBe(true)
     })
 
@@ -241,9 +241,7 @@ describe('unified memory rows', () => {
     it('keeps no memory line for the rows that never had one', () => {
         // The device-capability rule still comes first, and a row that has
         // no memory is refused whatever figure is passed for it.
-        const board = { kind: 'board', vramTotal: 0 }
         const accelerator = { kind: 'npu', vramTotal: 0 }
-        expect(showsMemoryLine(board, 0)).toBe(false)
         expect(showsMemoryLine(accelerator, 0)).toBe(false)
     })
 

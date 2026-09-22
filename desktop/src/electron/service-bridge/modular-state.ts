@@ -207,11 +207,11 @@ interface ModularGpu {
     temperatureCelsius: number
     // Whole watts the device is drawing; 0 when nothing meters it. Most of a
     // node's inventory has no meter at all (an integrated GPU, a Mali GPU, an
-    // RKNPU, an Edge TPU, the board row), so 0 here means "unmeasured" and
+    // RKNPU, an Edge TPU), so 0 here means "unmeasured" and
     // the UI must show no figure rather than "0 W".
     powerWatts: number
-    // "" for a GPU, "npu" for an accelerator row (Edge TPU / NPU), "board"
-    // for the host's motherboard controller. Carried through untouched: the
+    // "" for a GPU, "npu" for an accelerator row (Edge TPU / NPU). Carried
+    // through untouched: the
     // kinds are node-info's to define, and a row this build has not heard of
     // must still reach the UI.
     kind: string

@@ -15,7 +15,6 @@ import {
     memoryLineValue,
     memoryUsedBytes,
     showsMemoryLine,
-    showsUsage,
     thermalLine
 } from '@/ui/utils/hardware-rows'
 
@@ -225,10 +224,8 @@ export default function NodePerformance({
                                 </Text>
 
                                 <Stack gap="1">
-                                    {/* GPU Utilization — the motherboard controller reports
-                                        no busy figure at all, so it gets no Usage line rather
-                                        than a "0%" that would read as idle. */}
-                                    {showsUsage(gpu) && (
+                                    {/* GPU Utilization */}
+                                    {
                                         <Flex
                                             align="center"
                                             gap="2"
@@ -267,10 +264,10 @@ export default function NodePerformance({
                                                 </Text>
                                             </Flex>
                                         </Flex>
-                                    )}
+                                    }
 
-                                    {/* GPU VRAM — skipped for an accelerator row and for the
-                                        motherboard controller (no VRAM figure), and for a
+                                    {/* GPU VRAM — skipped for an accelerator row with no VRAM
+                                        figure, and for a
                                         shared pool nothing measured: a bare ceiling is a
                                         static number sitting among live readings. */}
                                     {showsMemoryLine(gpu, gpu.vramUsedBytes) && (
