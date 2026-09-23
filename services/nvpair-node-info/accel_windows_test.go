@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -223,8 +224,14 @@ func TestHailoPresenceAccelerators(t *testing.T) {
 	if row.VramBytes != 0 || row.UtilizationPercent != 0 || row.TemperatureCelsius != 0 {
 		t.Errorf("presence row carries dynamic fields: %+v", row)
 	}
-	if !row.UtilizationUnavailable || row.InferenceReady == nil || *row.InferenceReady {
-		t.Errorf("presence row = %+v, want utilization_unavailable and inference_ready=false like every Hailo row", row)
+	if !row.utilizationNeedsSample || row.InferenceReady == nil || *row.InferenceReady {
+		t.Errorf("presence row = %+v, want utilizationNeedsSample and inference_ready=false like every Hailo row", row)
+	}
+	// No sampler ever feeds a presence row, so on the wire it always says
+	// its utilization is unavailable.
+	body := string(buildResponse(rows, nil, 0, statsSnapshot{}, "", nil))
+	if !strings.Contains(body, `"utilization_unavailable":true`) {
+		t.Errorf("presence row on the wire = %s, want utilization_unavailable", body)
 	}
 }
 
@@ -561,10 +568,13 @@ func TestHailoAcceleratorRowShape(t *testing.T) {
 	if row.Name != "Hailo-8L AI Accelerator" || row.statsKey != "hailo:0000:03:00.0" || row.Kind != noderec.GPUKindAccelerator {
 		t.Fatalf("row = %+v", row)
 	}
-	// HailoRT has no busy counter on Windows: the row must say so, or its
-	// absent utilization renders as an idle "0 %". And no engine runs on it.
-	if !row.UtilizationUnavailable {
-		t.Error("UtilizationUnavailable unset on a Hailo row")
+	// HailoRT has no busy counter on Windows: the row's utilization exists
+	// only as a sampler reading of the activity file, so the row must need
+	// one, or its absent utilization renders as an idle "0 %" with no writer
+	// running. The flag itself is decided per response by buildResponseAt
+	// (TestHailoRowUtilizationOnTheWire). And no engine runs on it.
+	if !row.utilizationNeedsSample {
+		t.Error("utilizationNeedsSample unset on a Hailo row")
 	}
 	if row.InferenceReady == nil || *row.InferenceReady {
 		t.Errorf("InferenceReady = %v, want an explicit false", row.InferenceReady)

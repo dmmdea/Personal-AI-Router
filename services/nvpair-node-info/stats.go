@@ -30,9 +30,10 @@ type gpuStat struct {
 	// field rather than a device that claims to draw nothing.
 	PowerWatts float64
 	// UtilizationKnown is true when UtilizationPct is a reading rather than
-	// the zero value. Only the Rockchip samplers set it, and it is consulted
-	// only for the rows they feed (GPUInfo.utilizationNeedsSample); every other
-	// source publishes a stat only when it read something.
+	// the zero value. Only the Rockchip samplers and the Windows Hailo sampler
+	// set it, and it is consulted only for the rows they feed
+	// (GPUInfo.utilizationNeedsSample); every other source publishes a stat
+	// only when it read something.
 	UtilizationKnown bool
 	// SharedUsed is the bytes of shared system memory the adapter has
 	// allocated (Windows PDH \GPU Adapter Memory\Shared Usage), valid when
