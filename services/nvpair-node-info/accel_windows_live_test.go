@@ -96,13 +96,16 @@ func TestLiveHailoAccelerator(t *testing.T) {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Logf("sampler published: temperature_celsius=%d utilization_percent=%d",
-		stat.TemperatureC, stat.UtilizationPct)
+	t.Logf("sampler published: temperature_celsius=%d utilization_percent=%d utilization_known=%v",
+		stat.TemperatureC, stat.UtilizationPct, stat.UtilizationKnown)
 	if stat.TemperatureC <= 20 {
 		t.Errorf("temperature = %d C, want a plausible die temperature above 20 C", stat.TemperatureC)
 	}
-	if stat.UtilizationPct != 0 {
-		t.Errorf("utilization = %d, want 0: HailoRT exposes no busy counter on Windows", stat.UtilizationPct)
+	// HailoRT exposes no busy counter on Windows: a utilization exists only
+	// when the inference process publishes its activity file, and is then
+	// marked known. An unknown one must carry no figure.
+	if !stat.UtilizationKnown && stat.UtilizationPct != 0 {
+		t.Errorf("utilization = %d without a reading behind it", stat.UtilizationPct)
 	}
 
 	// The whole path end to end: the static row joined to the live sample the

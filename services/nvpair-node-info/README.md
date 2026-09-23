@@ -104,7 +104,7 @@ Field notes:
 - `temperature_celsius` is a device's thermal readout in whole degrees: on a GPU row from `nvidia-smi` (`temperature.gpu`, Linux and Windows; joined to the adapter by PCI address on Windows), on an accelerator row from its driver, and on `cpu` the package temperature from Linux hwmon (`coretemp` "Package id 0" / `k10temp` Tctl, else the `x86_pkg_temp` thermal zone). On Windows the package sensor is a ring-0 register, so the reading comes from the elevated `nvpair-sensors` service over `\\.\pipe\nvpair-sensors` (see `../nvpair-sensors/README.md`); a host without that service, without PawnIO, or with a stale report omits it. Every temperature field is omitted wherever it cannot be read.
 - `power_watts` is what a device is drawing in whole watts, published only where the hardware meters itself: an NVIDIA GPU (`nvidia-smi`'s `power.draw`, Linux and Windows), an AMD discrete GPU (the amdgpu hwmon's `PPT` input), and on `cpu` the package power — derived from the processor's energy counter, or on a Linux AMD APU host from that APU's `PPT` input, which meters the whole socket. Every other row has no meter and carries no such field — see **Power draw** below for the full table and for why a Linux host normally reports no `cpu.power_watts`.
 - All dynamic fields and the `cpu` / `memory` objects use `omitempty`: a value the service couldn't read is dropped from the JSON entirely rather than reported as a misleading literal zero. A genuinely idle CPU renders the same as "unknown" — that ambiguity is intentional and benign.
-- `utilization_unavailable` is `true` on a device row that has **no busy counter** this service can read, and absent everywhere else. It exists because `utilization_percent` is `omitempty`: a measured idle `0` is absent on the wire too, so the absence alone cannot tell "idle" from "cannot tell", and a client that renders both as "0 %" claims an idle device nobody measured. Set on a Hailo module (HailoRT has no busy counter on Windows), on every Linux Intel GPU (i915/xe keep theirs in a root-gated PMU), and on a Mali GPU or RKNPU row whose sampler has not read its counter — before the first read, or after three consecutive failed reads, rather than freezing the last value. A client must show such a row's usage as unknown; a row without the flag keeps its historical meaning, so an idle GPU on a node that predates the field still reads 0 %.
+- `utilization_unavailable` is `true` on a device row that has **no busy counter** this service can read, and absent everywhere else. It exists because `utilization_percent` is `omitempty`: a measured idle `0` is absent on the wire too, so the absence alone cannot tell "idle" from "cannot tell", and a client that renders both as "0 %" claims an idle device nobody measured. Set on a Hailo module whose inference process is not publishing a usable, current activity file (HailoRT has no busy counter on Windows; see [Utilization from the activity file](#utilization-from-the-activity-file)), on every Linux Intel GPU (i915/xe keep theirs in a root-gated PMU), and on a Mali GPU or RKNPU row whose sampler has not read its counter — before the first read, or after three consecutive failed reads, rather than freezing the last value. A client must show such a row's usage as unknown; a row without the flag keeps its historical meaning, so an idle GPU on a node that predates the field still reads 0 %.
 - `inference_ready` is `false` on a device no engine PAIR runs can use — an Arm Mali GPU, an RKNPU, a Google Coral Edge TPU, a Hailo module, a Linux Intel integrated GPU — and absent on every other row, which makes no claim either way. It travels per row rather than as a node-level id list because clients re-sort the rows and build their own ids. The desktop derives the node's inference-ready list from it, so a board whose only devices are a Mali GPU and an NPU shows its CPU and RAM instead of two idle GPU rings.
 - `memory.total_bytes` and `memory.used_bytes` are on **one base**: the memory the operating system manages, read from the same source the used figure is — `/proc/meminfo` `MemTotal` on Linux (used = `MemTotal - MemAvailable`), `GlobalMemoryStatusEx` `TotalPhys` on Windows (used = `TotalPhys - AvailPhys`), gopsutil's Mach readers on macOS. The Linux Intel, Mali, RKNPU and NVIDIA UMA rows use this same total as their `vram_bytes` ceiling; a Windows integrated GPU does not (see `memory_pool` below), because this base excludes the firmware-reserved memory an APU's graphics carve-out lives in. Installed DIMM capacity is not used: on Windows it counts hardware-reserved memory that can never appear as used, and on Linux it is not readable unprivileged. The Linux total used to be the count of online memory blocks times the block size, which counts the blocks around the PCI hole and at the top of RAM in full: a 64 GiB desktop with 2 GiB blocks published 66 GiB against a `MemTotal` of 62.7 GiB, and RAM % read two points low.
 - `vram_bytes` is reported through DXGI on Windows, `nvidia-smi` on Linux, and IORegistry on macOS. On a unified-memory NVIDIA GPU such as DGX Spark, Linux uses total physical system memory for `vram_bytes` and the independently sampled system-memory usage for `vram_used_bytes`. On Apple Silicon, `vram_bytes` is total physical unified memory and `vram_used_bytes` is the GPU driver's mapped allocation (`Alloc system memory`), not whole-system RAM usage or the momentarily active subset.
@@ -291,9 +291,47 @@ A Hailo M.2 module is not a display adapter, so DXGI never sees it. `nvpair-node
 
 **Ceilings on this platform. These are limits of HailoRT 4.24 on Windows, not gaps to work around:**
 
-- **No utilization.** HailoRT exposes no busy counter and its monitor mode is unsupported on Windows, so a Hailo row carries **no** `utilization_percent`. The field is omitted, never published as a literal `0`, which would read as "idle", and the row carries `utilization_unavailable:true` so a client can tell that absence from an idle reading. (On Linux the gasket driver's `interrupt_counts` supports the figure for an Edge TPU; there is no equivalent here.)
+- **No busy counter.** HailoRT exposes none and its monitor mode is unsupported on Windows (`hailortcli monitor` refuses), so node-info cannot measure utilization from the device. The figure comes from the process that runs inference on it instead — see [Utilization from the activity file](#utilization-from-the-activity-file). Without that file the row carries **no** `utilization_percent`, never a literal `0`, which would read as "idle", and carries `utilization_unavailable:true` so a client can tell that absence from an idle reading.
 - **No power.** Power measurement is unsupported on the M.2 Hailo-8L module, so `hailo_power_measurement` is not called.
-- So the row is **presence + name + temperature**, and nothing else.
+- So the row is **presence + name + temperature**, plus utilization while an inference process reports it.
+
+#### Utilization from the activity file
+
+The process that runs inference on the module tracks how long it has had at least one device call in flight and publishes that as a small JSON file. The sampler reads it on its own 5 s tick, right after the temperature, and the two sources are independent: a device the sampler cannot open still gets its utilization, and a writer that is not running costs the temperature nothing.
+
+**Where.** `%NVPAIR_ACCEL_ACTIVITY_DIR%\hailo.json` when that variable is set, else `%ProgramData%\nvpair\accel-activity\hailo.json`.
+
+**Schema 1** (the writer implements exactly this; node-info rejects anything else):
+
+```json
+{"schema":1,"device":"hailo-8l","pid":1234,"started_ms":1700000000000,"updated_ms":1700000005000,"busy_ms":2500,"inflight":1}
+```
+
+| field | meaning |
+| --- | --- |
+| `pid` | the writer's process id |
+| `started_ms` | epoch ms at which the writer's tracker started |
+| `updated_ms` | epoch ms of this write |
+| `busy_ms` | cumulative ms with at least one device call in flight, including the in-flight portion up to `updated_ms` |
+| `inflight` | device calls in flight at `updated_ms` |
+
+The file is UTF-8 (a byte-order mark is tolerated), replaced by temp-and-rename about every 500 ms while the writer lives, with a last write carrying `inflight:0` when it exits.
+
+**Reader rules.**
+
+- **Utilization** = (`busy_ms`₂ − `busy_ms`₁) / (`updated_ms`₂ − `updated_ms`₁) × 100 between two successive *distinct* samples of the same writer, measured entirely on the writer's own clock; clamped to 0–100 and rounded to a whole percent like every other row. The first sample of a writer is only a baseline, so a newly found writer shows "unavailable" for one tick before its first figure.
+- **Same writer** means the same `pid` and `started_ms`. A change in either — a restarted writer, whose `busy_ms` starts over — resets the baseline, as do counters that go backwards within one writer.
+- **Same `updated_ms` as last tick** is no new data: the last figure is held while the sample is fresh.
+- **Fresh** = `updated_ms` within 3 s of node-info's clock (six missed writes). A fresh file publishes `utilization_percent` and no `utilization_unavailable` — including a measured `0`, which is "idle".
+- **Stale, writer gone** — the pid does not exist, has exited, or belongs to a process created after `started_ms` (a reused pid): the inference process has ended, so the device is idle and the row publishes `0`.
+- **Stale, writer alive** — the writer is running but not reporting: `utilization_unavailable:true`. (A process node-info may not inspect is treated as alive, which is the answer that publishes no figure.)
+- **Absent, unreadable, not JSON, wrong `schema` or `device`, or a missing field**: `utilization_unavailable:true`, exactly as without a writer.
+- The file names a device type, not a module, so with **more than one module** fitted it cannot be attributed and every Hailo row stays `utilization_unavailable`. The PnP presence rows below have no sampler and are always `utilization_unavailable`.
+- node-info logs one line per state change (absent, invalid, pending, fresh, writer gone, writer silent), never one per tick.
+
+**A measured idle 0 on the wire.** `utilization_percent` is `omitempty`, so a fresh idle writer's `0` is absent from the row — and so is `utilization_unavailable`. That combination is the historical "idle" shape: the desktop reads an absent `utilization_percent` as `0` and renders "0%", and renders "—" only when `utilization_unavailable` is `true`.
+
+**How the file is opened.** Each tick opens it with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`, reads it, and closes it at once. Measured on Windows 11 / NTFS: a POSIX-semantics rename (`FILE_RENAME_FLAG_POSIX_SEMANTICS`) replaces the file while a reader holds it only if the reader shares delete, which `os.Open` does not; a classic `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` replace (Python's `os.replace`) fails with "access denied" while *any* handle is open, whatever its share mode. The reader therefore holds its handle for one small read every 5 s, and a writer that replaces with `MoveFileEx` should treat a failed replace as transient and write again on its next tick.
 
 **Without HailoRT installed**, a fitted module is still listed from the PnP enumerator (`HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1E60&DEV_*`), named from its PCI device id, with no temperature. That branch also retains an entry for a module that has since been removed, so the library scan — which talks to the hardware — is always preferred and the registry is read only when it is unavailable. A host with neither the library nor the device logs one Debug line and reports no accelerator, exactly as before.
 
