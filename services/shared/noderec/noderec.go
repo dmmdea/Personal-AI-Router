@@ -460,6 +460,19 @@ type GPUInfo struct {
 	// only when its own driver reports one (an AMD APU does, a DGX Spark does),
 	// and omits it otherwise rather than substituting the host's RAM usage.
 	MemoryPool string `json:"memory_pool,omitempty"`
+	// UtilizationUnavailable is true when the device has no busy counter the
+	// node can read (a Hailo module, a Linux Intel GPU, a Rockchip device
+	// whose counter is unreadable). UtilizationPercent is omitempty, so an
+	// idle 0 and "no source" are otherwise the same absent field; a client
+	// must render this row's usage as unknown rather than as 0 %. Absent on
+	// every row with a source, and on every row from a node that predates it.
+	UtilizationUnavailable bool `json:"utilization_unavailable,omitempty"`
+	// InferenceReady is false on a device no engine PAIR runs can use — a Mali
+	// GPU, an RKNPU, an Edge TPU, a Hailo module, a Linux Intel iGPU — and
+	// absent otherwise. A pointer, so absent keeps its historical meaning
+	// ("no readiness claim") and only an explicit false marks a row a client
+	// must not present as where the node's models run.
+	InferenceReady *bool `json:"inference_ready,omitempty"`
 }
 
 // GPUMemoryPoolUnified marks a GPUInfo row whose VramBytes is a memory pool

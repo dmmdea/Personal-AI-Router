@@ -50,7 +50,7 @@ const nvidiaSmiTimeout = 3 * time.Second
 //
 // On unified-memory architectures (UMA, e.g. Grace-Blackwell / DGX Spark)
 // nvidia-smi reports [N/A] for memory.total because the GPU shares system
-// DRAM; in that case VramBytes is filled from detectMemoryTotal() instead.
+// DRAM; in that case VramBytes is filled from systemMemTotal() instead.
 func detectGPUs() []GPUInfo {
 	return composeLinuxGPUs(
 		detectNvidiaGPUs(),
@@ -90,7 +90,7 @@ func detectNvidiaGPUs() []GPUInfo {
 	if len(gpus) == 0 || !uma {
 		return gpus
 	}
-	total := detectMemoryTotal()
+	total := systemMemTotal()
 	if total == 0 {
 		return gpus
 	}

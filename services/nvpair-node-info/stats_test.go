@@ -392,7 +392,7 @@ func TestBuildResponseRecoversDarwinGPUInventory(t *testing.T) {
 	}
 
 	static := []GPUInfo{{Name: "Apple M3 Max", statsKey: "ioreg:2a"}}
-	if merged := mergeGPUInventory(static, snap.GPUInventory); len(merged) != 1 ||
+	if merged := mergeGPUInventory(static, snap.GPUInventory, snap.GPUHardwareKeys); len(merged) != 1 ||
 		merged[0].VramBytes != 36<<30 {
 		t.Fatalf("matching recovered GPU did not enrich in place: %+v", merged)
 	}

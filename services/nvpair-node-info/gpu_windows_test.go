@@ -386,4 +386,25 @@ func TestDetectGPUsLive(t *testing.T) {
 		t.Fatalf("a registry holding this boot's LUIDs kept %d of %d adapters",
 			len(got), len(candidates))
 	}
+
+	// Every reported adapter carries its PCI identity, and no two share one:
+	// that identity is what keeps a card on one row when a driver reinstall
+	// reissues its LUID (mergeGPUInventory), and it must agree with the address
+	// the temperature join resolves for the same LUID.
+	byAddress := luidsByPCIAddress()
+	seen := map[string]string{}
+	for _, gpu := range gpus {
+		t.Logf("GPU %s hardwareKey=%q", gpu.statsKey, gpu.hardwareKey)
+		if gpu.hardwareKey == "" {
+			t.Errorf("%s (%s) has no PCI identity", gpu.Name, gpu.statsKey)
+			continue
+		}
+		if other, dup := seen[gpu.hardwareKey]; dup {
+			t.Errorf("%s and %s share hardwareKey %s", other, gpu.statsKey, gpu.hardwareKey)
+		}
+		seen[gpu.hardwareKey] = gpu.statsKey
+		if addr := gpu.hardwareKey[len("pci:"):]; byAddress[addr] != gpu.statsKey {
+			t.Errorf("temperature join maps %s to %q, detection says %q", addr, byAddress[addr], gpu.statsKey)
+		}
+	}
 }

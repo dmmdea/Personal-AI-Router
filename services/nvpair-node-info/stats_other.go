@@ -9,7 +9,7 @@ package main
 // /proc + nvidia-smi, and macOS uses Mach-backed gopsutil readers.
 //
 // Static CPU / memory data (name, core count, total bytes) is still
-// reported on these platforms via ghw in cpu_detect.go / memory_detect.go —
+// reported on these platforms via ghw in cpu_detect.go / memory_detect_other.go —
 // those calls don't go through this collector; only the dynamic
 // per-tick numbers do, and those are legitimately unknown here.
 

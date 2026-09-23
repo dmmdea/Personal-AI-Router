@@ -8,7 +8,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/noderec"
 )
@@ -77,19 +79,50 @@ func TestParseRKNPULoad(t *testing.T) {
 func TestRKNPUProductName(t *testing.T) {
 	cases := []struct {
 		compatible string
+		rootSoC    string
 		cores      int
 		want       string
 	}{
-		{"rockchip,rk3588-rknpu", 3, "Rockchip RK3588 NPU (3 cores)"},
-		{"rockchip,rk3568-rknpu", 1, "Rockchip RK3568 NPU (1 core)"},
-		{"rockchip,rk3576-rknpu", 0, "Rockchip RK3576 NPU"},
-		{"", 3, rknpuFallbackName},
-		{"rknpu", 3, rknpuFallbackName},
+		{"rockchip,rk3588-rknpu", "", 3, "Rockchip RK3588 NPU (3 cores)"},
+		{"rockchip,rk3588-rknpu", "RK3588", 3, "Rockchip RK3588 NPU (3 cores)"},
+		// The RK3588S shares the RK3588's NPU block and its compatible; the
+		// board's root compatible names the actual chip, as the CPU row does.
+		{"rockchip,rk3588-rknpu", "RK3588S", 3, "Rockchip RK3588S NPU (3 cores)"},
+		// A root part that is not a variant of the NPU's family (a board token,
+		// a different SoC) never renames the NPU.
+		{"rockchip,rk3588-rknpu", "RK3568", 3, "Rockchip RK3588 NPU (3 cores)"},
+		{"rockchip,rk3588-rknpu", "ORANGEPI", 3, "Rockchip RK3588 NPU (3 cores)"},
+		{"rockchip,rk3568-rknpu", "", 1, "Rockchip RK3568 NPU (1 core)"},
+		{"rockchip,rk3576-rknpu", "", 0, "Rockchip RK3576 NPU"},
+		{"", "RK3588S", 3, rknpuFallbackName},
+		{"rknpu", "", 3, rknpuFallbackName},
 	}
 	for _, tc := range cases {
-		if got := rknpuProductName(tc.compatible, tc.cores); got != tc.want {
-			t.Errorf("rknpuProductName(%q, %d) = %q, want %q", tc.compatible, tc.cores, got, tc.want)
+		if got := rknpuProductName(tc.compatible, tc.rootSoC, tc.cores); got != tc.want {
+			t.Errorf("rknpuProductName(%q, %q, %d) = %q, want %q", tc.compatible, tc.rootSoC, tc.cores, got, tc.want)
 		}
+	}
+}
+
+// TestRKNPUNamedFromTheBoardSoC walks the whole path on an RK3588S board: the
+// NPU node's compatible says rk3588, the root compatible says rk3588s, and the
+// row must name the same chip the CPU row on the same card does.
+func TestRKNPUNamedFromTheBoardSoC(t *testing.T) {
+	r := fakeRockchipRoots(t)
+	r.deviceTree = filepath.Join(t.TempDir(), "device-tree")
+	writeFile(t, filepath.Join(r.deviceTree, "model"), "Orange Pi 5\x00")
+	writeFile(t, filepath.Join(r.deviceTree, "compatible"), "rockchip,rk3588s-orangepi-5\x00rockchip,rk3588\x00")
+
+	dev, ok := findRKNPUDevice(r)
+	if !ok {
+		t.Fatal("findRKNPUDevice found no NPU in the fake tree")
+	}
+	row := rknpuRow(dev, dev.cores(), 0)
+	if row.Name != "Rockchip RK3588S NPU (3 cores)" {
+		t.Errorf("name = %q, want the board's RK3588S", row.Name)
+	}
+	if _, soc := deviceTreeIdentity(r.deviceTree); soc != "Rockchip RK3588S" {
+		t.Errorf("the CPU row's SoC = %q; the two rows must agree on RK3588S", soc)
 	}
 }
 
@@ -137,6 +170,12 @@ func TestFindRKNPUDeviceAndRow(t *testing.T) {
 	if noderec.MaxGPUUtilization([]noderec.GPUInfo{{Kind: row.Kind, UtilizationPercent: 100}}) != 0 {
 		t.Error("an NPU row must not contribute to GPU pressure")
 	}
+	if row.InferenceReady == nil || *row.InferenceReady {
+		t.Errorf("InferenceReady = %v, want an explicit false: no engine drives an RKNPU", row.InferenceReady)
+	}
+	if !row.utilizationNeedsSample {
+		t.Error("utilizationNeedsSample unset: an unreadable debugfs counter would publish as idle")
+	}
 
 	// The device's own devfreq load says 100 % while the NPU is idle; the
 	// debugfs counter says 0 %. The sampler must report the counter.
@@ -179,8 +218,15 @@ func TestFindRKNPUDeviceUnreadableLoad(t *testing.T) {
 	if stat.TemperatureC != 44 {
 		t.Errorf("temperature = %d, want 44", stat.TemperatureC)
 	}
-	if stat.UtilizationPct != 0 {
-		t.Errorf("utilization = %d, want it omitted (0)", stat.UtilizationPct)
+	if stat.UtilizationPct != 0 || stat.UtilizationKnown {
+		t.Errorf("utilization = %d (known %v), want it omitted and not known", stat.UtilizationPct, stat.UtilizationKnown)
+	}
+
+	// And the response says the row has no utilization source, rather than
+	// leaving an absent field a client reads as an idle NPU.
+	body := buildResponseAt([]GPUInfo{row}, nil, 0, statsSnapshot{GPU: map[string]gpuStat{row.statsKey: stat}}, "", nil, time.Now())
+	if !strings.Contains(string(body), `"utilization_unavailable":true`) {
+		t.Errorf("response = %s, want utilization_unavailable on the unread NPU", body)
 	}
 }
 

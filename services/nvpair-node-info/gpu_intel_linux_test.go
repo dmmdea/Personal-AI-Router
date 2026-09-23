@@ -155,6 +155,14 @@ func TestDetectIntelGPUsIntegratedRow(t *testing.T) {
 	if got.TemperatureCelsius != 0 {
 		t.Errorf("TemperatureCelsius = %d, want 0/absent: an iGPU has no sensor of its own", got.TemperatureCelsius)
 	}
+	// And the absence is explicit, so a client does not render it as idle.
+	if !got.UtilizationUnavailable {
+		t.Error("UtilizationUnavailable unset: an absent utilization_percent would render as an idle 0 %")
+	}
+	// No engine PAIR runs on Linux drives an Intel iGPU.
+	if got.InferenceReady == nil || *got.InferenceReady {
+		t.Errorf("InferenceReady = %v, want an explicit false", got.InferenceReady)
+	}
 }
 
 // TestDetectIntelGPUsIntegratedRowWireShape is the defect itself, asserted on
@@ -186,6 +194,12 @@ func TestDetectIntelGPUsIntegratedRowWireShape(t *testing.T) {
 	}
 	if used, present := row["vram_used_bytes"]; present {
 		t.Errorf("vram_used_bytes = %v, want the key absent (the host's figure is %d)", used, hostUsed)
+	}
+	if got := row["utilization_unavailable"]; got != true {
+		t.Errorf("utilization_unavailable = %v, want true on the wire", got)
+	}
+	if got, present := row["inference_ready"]; !present || got != false {
+		t.Errorf("inference_ready = %v (present %v), want an explicit false on the wire", got, present)
 	}
 	// The ceiling stays: a client still needs to know how much memory the
 	// device can reach, it just must not be told how much of it is spent.
@@ -364,6 +378,15 @@ func TestDetectIntelGPUsDiscreteReadsVRAM(t *testing.T) {
 	}
 	if gpus[0].usesSystemMemoryUsage {
 		t.Error("usesSystemMemoryUsage set on a discrete card: its VRAM is not system RAM")
+	}
+	// An Arc card has no unprivileged busy counter either, but whether an
+	// engine can drive it is not this row's claim to make: readiness stays
+	// unset, as on every other discrete card.
+	if !gpus[0].UtilizationUnavailable {
+		t.Error("UtilizationUnavailable unset on an Arc card: i915/xe expose no busy counter for it either")
+	}
+	if gpus[0].InferenceReady != nil {
+		t.Errorf("InferenceReady = %v on a discrete card, want it unset", *gpus[0].InferenceReady)
 	}
 }
 

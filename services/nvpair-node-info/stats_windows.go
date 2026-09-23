@@ -6,8 +6,10 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -77,6 +79,7 @@ import (
 
 const (
 	pdhCounterPathDedicated = `\GPU Adapter Memory(*)\Dedicated Usage`
+	pdhCounterPathShared    = `\GPU Adapter Memory(*)\Shared Usage`
 	pdhCounterPathEngine    = `\GPU Engine(*)\Utilization Percentage`
 	pdhCounterPathCPU       = `\Processor(_Total)\% Processor Time`
 
@@ -133,6 +136,7 @@ var (
 	// isn't present now, it isn't coming back without a reboot, and we
 	// don't want to log-spam on every retry attempt during startup.
 	pdhVRAMUnavailable   atomic.Bool
+	pdhSharedUnavailable atomic.Bool
 	pdhEngineUnavailable atomic.Bool
 	pdhCPUUnavailable    atomic.Bool
 )
@@ -196,9 +200,11 @@ func luidKey(low uint32, high int32) string {
 type statsCollector struct {
 	query         uintptr
 	vramCounter   uintptr
+	sharedCounter uintptr
 	engineCounter uintptr
 	cpuCounter    uintptr
 	hasVRAM       bool
+	hasShared     bool
 	hasEngine     bool
 	hasCPU        bool
 
@@ -214,6 +220,12 @@ type statsCollector struct {
 	// folded into the startup list by main.go's mergeGPUInventory. nil until a
 	// detection returns at least one adapter.
 	gpuInventory atomic.Pointer[[]GPUInfo]
+
+	// gpuHardwareKeys is every statsKey -> hardwareKey pairing runGPUInventory
+	// has published, kept after the statsKey stops being detected, and
+	// published into every Snapshot() as GPUHardwareKeys. Each publish is a
+	// new map; one already published is never written again.
+	gpuHardwareKeys atomic.Pointer[map[string]string]
 
 	// detect enumerates the host's adapters. Always detectGPUs in production;
 	// injected in tests so the recovery loop runs without DXGI.
@@ -312,12 +324,16 @@ func (c *statsCollector) startGPUInventory() {
 //     selectPhysicalAdapters now refuses) or simply lose a race with the
 //     display driver, and then served an empty GPU list for as long as it ran.
 //     While nothing has been detected this retries every inventoryRecoverEvery.
-//   - A set that changed after startup: an adapter hot-plugged, or a clone a
-//     remote session brought in. Once adapters are known this re-detects every
-//     inventoryRefreshEvery and republishes only when the statsKey set differs,
-//     so the steady state is one enumeration a minute and no snapshot churn.
-//     Only additions reach the response: mergeGPUInventory never drops an
-//     adapter the startup enumeration already reported.
+//   - A set that changed after startup: an adapter hot-plugged, a clone a
+//     remote session brought in, or a card whose LUID was reissued because its
+//     display driver was installed, updated or restarted. Once adapters are
+//     known this re-detects every inventoryRefreshEvery and republishes only
+//     when the adapter identities differ (gpuInventoryIdentity: the statsKey
+//     set, or an adapter's PCI address becoming readable), so the steady state
+//     is one enumeration a minute and no snapshot churn. mergeGPUInventory
+//     never drops an adapter the startup enumeration already reported; a
+//     reissued LUID moves that adapter's row to the new key
+//     (GPUInfo.hardwareKey) instead of adding one.
 //
 // Detection walks COM and reads the registry, which is why it lives on its own
 // goroutine rather than on the stats tick. Recovered adapters need no extra
@@ -325,15 +341,17 @@ func (c *statsCollector) startGPUInventory() {
 // already collects every LUID the counters report regardless of what the
 // inventory knew, so VRAM and utilization land on them at the next tick.
 // Temperature does the same through gputemp_windows.go, which resolves an
-// unknown adapter address on demand and never applies the registry gate.
+// unknown adapter address on demand, re-resolves every address when a
+// detection here gains a statsKey (invalidate), and never applies the
+// registry gate.
 func (c *statsCollector) runGPUInventory() {
 	defer c.wg.Done()
-	var published []string
+	var published []adapterIdentity
 	attempts := 0
 	for {
 		attempts++
 		if gpus := c.detect(); len(gpus) > 0 {
-			if keys := gpuStatsKeys(gpus); !slices.Equal(keys, published) {
+			if ids := gpuInventoryIdentity(gpus); !slices.Equal(ids, published) {
 				switch {
 				case published != nil:
 					slog.Info("GPU inventory changed; republishing",
@@ -346,9 +364,15 @@ func (c *statsCollector) runGPUInventory() {
 				default:
 					slog.Debug("GPU inventory detected", "adapters", len(gpus))
 				}
-				published = keys
+				gained := gainedKey(ids, published)
+				published = ids
+				hardwareKeys := rememberHardwareKeys(c.gpuHardwareKeys.Load(), gpus)
+				c.gpuHardwareKeys.Store(&hardwareKeys)
 				inventory := gpus
 				c.gpuInventory.Store(&inventory)
+				if gained {
+					c.gpuTemps.invalidate()
+				}
 			}
 		}
 		wait := c.inventoryRefreshEvery
@@ -365,17 +389,27 @@ func (c *statsCollector) runGPUInventory() {
 	}
 }
 
-// gpuStatsKeys returns the sorted statsKeys of an inventory, the identity
-// runGPUInventory compares two detections by. A name or a VRAM size is a
-// property of an adapter that is already in the set, so only the set itself
-// decides whether a republish is worth it.
-func gpuStatsKeys(gpus []GPUInfo) []string {
-	keys := make([]string, 0, len(gpus))
+// adapterIdentity is what runGPUInventory compares two detections by: the
+// statsKey every live reading joins on, and the hardwareKey mergeGPUInventory
+// follows a reissued statsKey with.
+type adapterIdentity struct{ statsKey, hardwareKey string }
+
+// gpuInventoryIdentity returns an inventory's adapter identities, sorted. A
+// name or a VRAM size is a property of an adapter that is already in the set,
+// so only the identities decide whether a republish is worth it. The
+// hardwareKey is part of the identity because it can arrive after the
+// statsKey: when D3DKMTOpenAdapterFromLuid failed for a card at startup (its
+// driver not ready yet), the detection that first reads its PCI address must
+// be republished, or a later reissue of that card's LUID finds no row to move.
+func gpuInventoryIdentity(gpus []GPUInfo) []adapterIdentity {
+	ids := make([]adapterIdentity, 0, len(gpus))
 	for _, gpu := range gpus {
-		keys = append(keys, gpu.statsKey)
+		ids = append(ids, adapterIdentity{statsKey: gpu.statsKey, hardwareKey: gpu.hardwareKey})
 	}
-	slices.Sort(keys)
-	return keys
+	slices.SortFunc(ids, func(a, b adapterIdentity) int {
+		return cmp.Or(cmp.Compare(a.statsKey, b.statsKey), cmp.Compare(a.hardwareKey, b.hardwareKey))
+	})
+	return ids
 }
 
 func (c *statsCollector) open() error {
@@ -388,6 +422,12 @@ func (c *statsCollector) open() error {
 		c.vramCounter = ctr
 		c.hasVRAM = true
 	}
+	// Shared Usage is read for every adapter but published only for an
+	// integrated one (GPUInfo.usedIncludesShared), whose pool it half-makes.
+	if ctr, ok := c.addCounter(pdhCounterPathShared, &pdhSharedUnavailable); ok {
+		c.sharedCounter = ctr
+		c.hasShared = true
+	}
 	if ctr, ok := c.addCounter(pdhCounterPathEngine, &pdhEngineUnavailable); ok {
 		c.engineCounter = ctr
 		c.hasEngine = true
@@ -397,7 +437,7 @@ func (c *statsCollector) open() error {
 		c.hasCPU = true
 	}
 
-	if !c.hasVRAM && !c.hasEngine && !c.hasCPU {
+	if !c.hasVRAM && !c.hasShared && !c.hasEngine && !c.hasCPU {
 		procPdhCloseQuery.Call(c.query)
 		c.query = 0
 		return fmt.Errorf("no performance counters available on this host")
@@ -547,6 +587,9 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 			out[lname] = s
 		}
 	}
+	if c.hasShared {
+		foldSharedUsage(out, readCounterLarge(c.sharedCounter))
+	}
 	utilizationSamples := 0
 	if c.hasEngine {
 		util := aggregateUtilization(readCounterDouble(c.engineCounter))
@@ -603,17 +646,30 @@ func (c *statsCollector) decodeCPU() uint32 {
 // differentiate "zero used" (an unrealistic but valid reading) from
 // "we don't know" in a future refactor.
 func readMemoryUsed() (uint64, bool) {
+	ms, ok := readMemoryStatus()
+	if !ok || ms.AvailPhys > ms.TotalPhys {
+		return 0, false
+	}
+	return ms.TotalPhys - ms.AvailPhys, true
+}
+
+// readMemoryStatus is the one GlobalMemoryStatusEx call both halves of the
+// memory readout come from: detectMemoryTotal publishes its TotalPhys and
+// readMemoryUsed subtracts AvailPhys from that same field, so the two are on
+// one base (see systemMemTotal in memory_detect.go). ok is false when the call
+// fails or reports no physical memory.
+func readMemoryStatus() (memoryStatusEx, bool) {
 	var ms memoryStatusEx
 	ms.Length = uint32(unsafe.Sizeof(ms))
 	r, _, err := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&ms)))
 	if r == 0 {
 		slog.Debug("GlobalMemoryStatusEx failed", "err", err)
-		return 0, false
+		return memoryStatusEx{}, false
 	}
-	if ms.TotalPhys == 0 || ms.AvailPhys > ms.TotalPhys {
-		return 0, false
+	if ms.TotalPhys == 0 {
+		return memoryStatusEx{}, false
 	}
-	return ms.TotalPhys - ms.AvailPhys, true
+	return ms, true
 }
 
 // readCounterLarge pulls the PDH_FMT_LARGE payload for each instance of
@@ -710,8 +766,14 @@ func (c *statsCollector) Snapshot() statsSnapshot {
 	if p := c.latest.Load(); p != nil {
 		snap = *p
 	}
+	// Inventory first: runGPUInventory stores the pairings before the
+	// inventory they came from, so a reader that sees an inventory also sees
+	// its pairings.
 	if inventory := c.gpuInventory.Load(); inventory != nil {
 		snap.GPUInventory = *inventory
+	}
+	if hardwareKeys := c.gpuHardwareKeys.Load(); hardwareKeys != nil {
+		snap.GPUHardwareKeys = *hardwareKeys
 	}
 	return snap
 }
@@ -739,4 +801,34 @@ func (c *statsCollector) Stop() {
 			c.query = 0
 		}
 	})
+}
+
+// rememberHardwareKeys returns a new map holding the pairings in known plus
+// every statsKey -> hardwareKey pairing in gpus. A pairing is kept after its
+// statsKey stops being detected: that is when mergeGPUInventory needs it, to
+// match a startup row that lacked a hardwareKey to the same card under a
+// reissued LUID. It grows by one entry per LUID a card has ever had.
+func rememberHardwareKeys(known *map[string]string, gpus []GPUInfo) map[string]string {
+	out := map[string]string{}
+	if known != nil {
+		out = maps.Clone(*known)
+	}
+	for _, gpu := range gpus {
+		if gpu.statsKey != "" && gpu.hardwareKey != "" {
+			out[gpu.statsKey] = gpu.hardwareKey
+		}
+	}
+	return out
+}
+
+// gainedKey reports whether next holds a statsKey prev lacks. Only the
+// statsKey counts: an address learned for an adapter already in the set moves
+// no reading, so it is no reason to re-resolve the temperature join.
+func gainedKey(next, prev []adapterIdentity) bool {
+	for _, n := range next {
+		if !slices.ContainsFunc(prev, func(p adapterIdentity) bool { return p.statsKey == n.statsKey }) {
+			return true
+		}
+	}
+	return false
 }

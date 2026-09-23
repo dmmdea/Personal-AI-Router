@@ -204,7 +204,7 @@ func TestWindowsCollectorRepublishesChangedGPUInventory(t *testing.T) {
 	if c.gpuInventory.Load() == published {
 		t.Fatal("the changed adapter set reused the previous publication")
 	}
-	if keys := gpuStatsKeys(c.Snapshot().GPUInventory); len(keys) != 2 || keys[0] == keys[1] {
-		t.Fatalf("statsKeys = %v", keys)
+	if ids := gpuInventoryIdentity(c.Snapshot().GPUInventory); len(ids) != 2 || ids[0].statsKey == ids[1].statsKey {
+		t.Fatalf("adapter identities = %v", ids)
 	}
 }

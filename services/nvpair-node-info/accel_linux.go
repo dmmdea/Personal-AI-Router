@@ -94,13 +94,22 @@ func detectAccelerators() []GPUInfo {
 	for _, dev := range listApexDevices() {
 		vendor := readSysfs(filepath.Join(dev.dir, "device", "vendor"))
 		device := readSysfs(filepath.Join(dev.dir, "device", "device"))
-		out = append(out, GPUInfo{
-			Name:     apexProductName(vendor, device),
-			Kind:     noderec.GPUKindAccelerator,
-			statsKey: accelStatsKey(dev.name),
-		})
+		out = append(out, apexRow(apexProductName(vendor, device), dev.name))
 	}
 	return out
+}
+
+// apexRow is one Edge TPU's inventory row. Its utilization is a real
+// measurement (the interrupt-count sampler), so it carries no
+// utilization_unavailable; but no engine PAIR runs can schedule work on an
+// Edge TPU, so it is marked not inference-ready.
+func apexRow(name, devName string) GPUInfo {
+	return GPUInfo{
+		Name:           name,
+		Kind:           noderec.GPUKindAccelerator,
+		InferenceReady: notInferenceReady(),
+		statsKey:       accelStatsKey(devName),
+	}
 }
 
 // apexProductName maps sysfs vendor/device strings ("0x1ac1", "0x089a") to a

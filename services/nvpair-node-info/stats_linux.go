@@ -185,16 +185,23 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if t, ok := c.cpuTemp.read(); ok {
 		snap.CPUTempC = t
 	}
-	if w, ok := c.cpuPower.read(time.Now()); ok {
-		snap.CPUPowerWatts = w
-	}
 
 	gpu := make(map[string]gpuStat)
 	sampledAt := time.Time{}
 	if c.decodeGPU(gpu) {
 		sampledAt = time.Now()
 	}
-	sampledAt = amdSampleAt(gpu, sampledAt)
+	sampledAt, apuPackage := amdSampleAt(gpu, sampledAt)
+
+	if c.cpuPower.path != "" {
+		if w, ok := c.cpuPower.read(time.Now()); ok {
+			snap.CPUPowerWatts = w
+		}
+	} else if apuPackage.ok {
+		// No readable RAPL counter: an AMD APU's SMU still meters the package,
+		// unprivileged (stats_amd_linux.go).
+		snap.CPUPowerWatts = apuPackage.watts
+	}
 	applyGPUStats(previous, snap, gpu, sampledAt)
 	c.mergeAccelStats(snap)
 	mergeRockchipStats(snap)

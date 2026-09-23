@@ -34,9 +34,13 @@ import (
 //     matching the capacity rule so used never exceeds total.
 //   - temperature: the amdgpu hwmon's edge sensor (temp*_input, millidegrees).
 //   - power: the same hwmon's power1_input, the average socket power the SMU
-//     reports (labelled PPT — package power tracking). It is in microwatts,
-//     and on an APU it covers the whole package, CPU cores included, which is
-//     what "the GPU is drawing" means on a part with no separate rail.
+//     reports (labelled PPT — package power tracking), in microwatts. On a
+//     discrete card that is the card. On an APU it is the whole package, CPU
+//     cores included, so it is published on the CPU row (the package power
+//     cpu.power_watts documents, which is where an Intel host's package
+//     figure sits) rather than as the GPU's draw, and the APU's GPU row
+//     carries no watts, as an Intel iGPU row carries none. See
+//     amdAPUPackageWatts.
 //
 // A host without amdgpu costs one os.ReadDir of /sys/class/drm per tick and
 // logs nothing at all; a host without /sys/class/drm logs a single Debug line
@@ -70,12 +74,21 @@ const (
 // reports the sample time the snapshot should carry. A usable utilization
 // reading is fresh GPU telemetry exactly as an nvidia-smi one is, so it
 // advances sampledAt (and with it TelemetryValid); anything less leaves the
-// caller's value untouched. This is the single line stats_linux.go adds.
-func amdSampleAt(out map[string]gpuStat, sampledAt time.Time) time.Time {
-	if decodeAMD(drmClassDir, out) {
-		return time.Now()
+// caller's value untouched. The same pass reports an APU's package power
+// (see amdAPUPackageWatts), so the collector reads /sys/class/drm once a tick.
+func amdSampleAt(out map[string]gpuStat, sampledAt time.Time) (time.Time, amdPackagePower) {
+	sampled, pkg := decodeAMDPass(drmClassDir, out)
+	if sampled {
+		return time.Now(), pkg
 	}
-	return sampledAt
+	return sampledAt, pkg
+}
+
+// amdPackagePower is an APU's PPT reading, the package's draw; ok is false on
+// a host with no APU or an APU with no power input.
+type amdPackagePower struct {
+	watts float64
+	ok    bool
 }
 
 // decodeAMD samples every AMD card under drmRoot into out, keyed by the same
@@ -85,7 +98,13 @@ func amdSampleAt(out map[string]gpuStat, sampledAt time.Time) time.Time {
 // left out of the map entirely, so a transient sysfs failure keeps the row's
 // previous values rather than publishing zeros over them.
 func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
-	sampled := false
+	sampled, _ := decodeAMDPass(drmRoot, out)
+	return sampled
+}
+
+// decodeAMDPass is decodeAMD plus the first APU's package power, read in the
+// same walk over the cards.
+func decodeAMDPass(drmRoot string, out map[string]gpuStat) (sampled bool, pkg amdPackagePower) {
 	for _, c := range listAMDCards(drmRoot) {
 		var stat gpuStat
 		any := false
@@ -102,15 +121,21 @@ func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
 			stat.TemperatureC = temp
 			any = true
 		}
+		// An APU's PPT is the package, not the GPU: it goes to the CPU row
+		// (amdAPUPackageWatts) and the GPU row carries no watts.
 		if watts, ok := amdPowerWatts(c.deviceDir); ok {
-			stat.PowerWatts = watts
-			any = true
+			if !c.unifiedPool {
+				stat.PowerWatts = watts
+				any = true
+			} else if !pkg.ok {
+				pkg = amdPackagePower{watts: watts, ok: true}
+			}
 		}
 		if any {
 			out[c.statsKey] = stat
 		}
 	}
-	return sampled
+	return sampled, pkg
 }
 
 // amdBusyPercent reads gpu_busy_percent. Out-of-range values are rejected:
@@ -200,6 +225,26 @@ func amdHwmonDirs(deviceDir string) []string {
 	return paths
 }
 
+// amdAPUPackageWatts is an APU's package power in whole watts: the PPT input of
+// the first unified-pool amdgpu card under drmRoot. ok is false on a host with
+// no APU or whose APU publishes no power input.
+//
+// The collector publishes it as cpu.power_watts when the host has no readable
+// RAPL package counter — the ordinary case, since the kernel keeps energy_uj
+// root-only. The SMU's socket average and the RAPL package domain measure the
+// same thing: on a Barcelo APU they agreed within a watt (PPT mean 25 W, RAPL
+// package-0 24.8-25.3 W over the same windows). Publishing it on the GPU row
+// instead showed CPU-bound work as GPU draw and left the CPU row blank.
+//
+// The GPU's own share of the package is not published: the SMU's gpu_metrics
+// table splits the socket into rails, but the graphics rail is shared with the
+// CPU cores on these parts and the per-core power unit has not been calibrated
+// against RAPL, so a subtraction would be a guess.
+func amdAPUPackageWatts(drmRoot string) (float64, bool) {
+	_, pkg := decodeAMDPass(drmRoot, map[string]gpuStat{})
+	return pkg.watts, pkg.ok
+}
+
 // amdPowerWatts returns the card's socket power in whole watts, from the
 // amdgpu hwmon's power1_input (microwatts).
 //
@@ -210,9 +255,8 @@ func amdHwmonDirs(deviceDir string) []string {
 // figure instead of reporting a card that draws nothing.
 //
 // On an APU this is package power: the CPU cores and the GPU share one socket
-// and one budget, and the SMU meters the socket. That is the honest answer for
-// the GPU row on such a part, not a defect — there is no separate GPU rail to
-// report.
+// and one budget, and the SMU meters the socket. That is why an APU's reading
+// goes to the CPU row (amdAPUPackageWatts) and not to its GPU row.
 func amdPowerWatts(deviceDir string) (float64, bool) {
 	fallback := ""
 	for _, hwmonDir := range amdHwmonDirs(deviceDir) {

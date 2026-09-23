@@ -174,6 +174,14 @@ func TestFindMaliDeviceAndRow(t *testing.T) {
 	if row.VramUsedBytes != 0 {
 		t.Errorf("VramUsedBytes = %d, want 0/absent", row.VramUsedBytes)
 	}
+	// No engine PAIR runs has a Mali backend: the row must say so, or a
+	// client presents it as the board's inference GPU.
+	if row.InferenceReady == nil || *row.InferenceReady {
+		t.Errorf("InferenceReady = %v, want an explicit false", row.InferenceReady)
+	}
+	if !row.utilizationNeedsSample {
+		t.Error("utilizationNeedsSample unset: an unread Mali counter would publish as idle")
+	}
 
 	if util, ok := dev.readUtilization(); !ok || util != 37 {
 		t.Errorf("readUtilization = (%d, %v), want (37, true)", util, ok)
@@ -262,8 +270,43 @@ func TestRockchipSamplerKeepsLastGoodReading(t *testing.T) {
 		t.Fatalf("first sample = %d, want 80", got)
 	}
 	readable = false
-	if got := sampleOnce(s).UtilizationPct; got != 80 {
-		t.Fatalf("after a failed read utilization = %d, want the last good 80", got)
+	if got := sampleOnce(s); got.UtilizationPct != 80 || !got.UtilizationKnown {
+		t.Fatalf("after a failed read = %+v, want the last good 80, still known", got)
+	}
+}
+
+// TestRockchipSamplerDropsAReadingItCannotRefresh pins the other end of the
+// hold. Before the first successful read the stat says the utilization is not
+// known, and after rockchipUtilHoldTicks consecutive failures it says so again
+// instead of freezing the last value: a counter that became unreadable must
+// not keep showing a reading nobody is taking. A good read restores it.
+func TestRockchipSamplerDropsAReadingItCannotRefresh(t *testing.T) {
+	readable := false
+	s := newRockchipSampler("rknpu:test", func() (uint32, bool) {
+		if !readable {
+			return 0, false
+		}
+		return 55, true
+	}, "")
+	if got := sampleOnce(s); got.UtilizationKnown {
+		t.Fatalf("never-read sample = %+v, want UtilizationKnown=false", got)
+	}
+	readable = true
+	if got := sampleOnce(s); got.UtilizationPct != 55 || !got.UtilizationKnown {
+		t.Fatalf("readable sample = %+v, want 55, known", got)
+	}
+	readable = false
+	for tick := 1; tick < rockchipUtilHoldTicks; tick++ {
+		if got := sampleOnce(s); got.UtilizationPct != 55 || !got.UtilizationKnown {
+			t.Fatalf("failed read %d = %+v, want the held 55", tick, got)
+		}
+	}
+	if got := sampleOnce(s); got.UtilizationKnown || got.UtilizationPct != 0 {
+		t.Fatalf("after %d failed reads = %+v, want UtilizationKnown=false and no value", rockchipUtilHoldTicks, got)
+	}
+	readable = true
+	if got := sampleOnce(s); got.UtilizationPct != 55 || !got.UtilizationKnown {
+		t.Fatalf("recovered sample = %+v, want 55, known", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import { memo } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { CpuFallbackInfo, GpuInfo } from '@/ui/types/node-hardware'
 import {
+    formatUsage,
     memoryLabel,
     memoryLineValue,
     showsMemoryLine,
@@ -77,17 +78,18 @@ function NodeChartLegend({
                 return (
                     <Stack key={gpu.id} gap="1">
                         <Text kind="body/semibold/sm">{gpu.name}</Text>
-                        {
+                        {/* "—" for a device with no busy counter (a Hailo module, a
+                        Linux Intel GPU): "0%" would read as idle, and nobody
+                        measured it. See usagePercent in hardware-rows.ts. */}
+                        <Flex align="center" gap="2">
+                            <ColorDot color={gpu.usageColor} />
                             <Flex align="center" gap="2">
-                                <ColorDot color={gpu.usageColor} />
-                                <Flex align="center" gap="2">
-                                    <Text kind="body/regular/sm" className="text-subtle-color">
-                                        Usage
-                                    </Text>
-                                    <Text kind="body/semibold/sm">{gpu.usage}%</Text>
-                                </Flex>
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    Usage
+                                </Text>
+                                <Text kind="body/semibold/sm">{formatUsage(gpu.usage)}</Text>
                             </Flex>
-                        }
+                        </Flex>
                         {/* An accelerator (Edge TPU / NPU) may have no VRAM figure; the row would only ever
                         read "0 B / 0 B". A device sharing the host's memory
                         reads "Shared" — and gets a line only when something
