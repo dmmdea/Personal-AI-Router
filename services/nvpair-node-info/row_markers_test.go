@@ -16,8 +16,8 @@ import (
 //     it outright; a sampled row gets it until its sampler reports a reading.
 //   - inference_ready appears only as an explicit false, so every row that
 //     makes no claim keeps the historical shape.
-//   - a unified row whose only counter covers part of its pool publishes its
-//     ceiling and no used figure.
+//   - a unified row whose used figure is dedicated + shared publishes none
+//     when only the dedicated half was sampled.
 func TestBuildResponseRowMarkers(t *testing.T) {
 	static := []GPUInfo{
 		{Name: "Discrete card", VramBytes: 8 << 30, statsKey: "a"},
@@ -25,7 +25,7 @@ func TestBuildResponseRowMarkers(t *testing.T) {
 		{Name: "Sampled SoC GPU, read", MemoryPool: "unified", InferenceReady: notInferenceReady(), utilizationNeedsSample: true, statsKey: "c"},
 		{Name: "Sampled SoC GPU, unread", MemoryPool: "unified", utilizationNeedsSample: true, statsKey: "d"},
 		{Name: "Sampled SoC GPU, no stat yet", MemoryPool: "unified", utilizationNeedsSample: true, statsKey: "e"},
-		{Name: "Windows iGPU", VramBytes: 64 << 30, MemoryPool: "unified", sharedUsageUnmeasured: true, statsKey: "f"},
+		{Name: "Windows iGPU", VramBytes: 64 << 30, MemoryPool: "unified", usedIncludesShared: true, statsKey: "f"},
 	}
 	snap := statsSnapshot{
 		GPU: map[string]gpuStat{
@@ -71,13 +71,13 @@ func TestBuildResponseRowMarkers(t *testing.T) {
 			t.Errorf("row %d = %v, want utilization_unavailable", i, row(i))
 		}
 	}
-	// The Windows iGPU keeps its measured utilization and drops the partial
-	// used figure.
+	// The Windows iGPU keeps its measured utilization and, with no Shared
+	// Usage sample, drops the dedicated-only half of its used figure.
 	if row(5)["utilization_percent"] != float64(12) {
 		t.Errorf("iGPU utilization = %v, want 12", row(5)["utilization_percent"])
 	}
 	if used, present := row(5)["vram_used_bytes"]; present {
-		t.Errorf("iGPU vram_used_bytes = %v, want absent: Dedicated Usage covers only the stolen aperture", used)
+		t.Errorf("iGPU vram_used_bytes = %v, want absent without a Shared Usage sample", used)
 	}
 	if row(5)["vram_bytes"] != float64(64<<30) {
 		t.Errorf("iGPU vram_bytes = %v, want the pool ceiling", row(5)["vram_bytes"])

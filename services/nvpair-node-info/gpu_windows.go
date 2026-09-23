@@ -427,7 +427,7 @@ func enumerateAdapterCandidates() []adapterCandidate {
 		if adapterIntegrated(desc.VendorID, desc.DeviceID, func() (bool, bool) {
 			return dxcoreIsIntegrated(luidLow, luidHigh)
 		}) {
-			markIntegrated(&gpu, systemMemTotal())
+			markIntegrated(&gpu, uint64(desc.DedicatedVideoMemory), uint64(desc.SharedSystemMemory))
 		}
 
 		candidates = append(candidates, adapterCandidate{

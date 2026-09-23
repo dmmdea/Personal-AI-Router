@@ -63,17 +63,20 @@ func TestAdapterIntegrated(t *testing.T) {
 }
 
 // TestMarkIntegratedPublishesThePool is the defect as the wire shows it. DXGI
-// gave a UHD 630 128 MB of DedicatedVideoMemory and PDH gave it 0 dedicated
-// bytes, so the card read "VRAM 0 B / 128 MB". The row must now be a unified
-// pool with the host's memory total as its ceiling and no used figure, which
-// is how the same part has always been published on Linux; a discrete card
-// beside it is untouched.
+// gave a UHD 630 128 MB of DedicatedVideoMemory and PDH 0 dedicated bytes, so
+// the card read "VRAM 0 B / 128 MB". An integrated row is now a unified pool
+// whose ceiling is dedicated + shared (the audit's UHD 630: 128 MB + 47.8 GiB)
+// and whose used figure is Dedicated Usage + Shared Usage (0 + 8.4 MB); a
+// discrete card beside it is untouched.
 func TestMarkIntegratedPublishesThePool(t *testing.T) {
-	const hostTotal uint64 = 51325829120 + 128<<20
-	igpu := GPUInfo{Name: "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", VramBytes: 128 << 20, statsKey: "luid_igpu"}
-	markIntegrated(&igpu, hostTotal)
-	if igpu.MemoryPool != noderec.GPUMemoryPoolUnified || igpu.VramBytes != hostTotal || !igpu.sharedUsageUnmeasured {
-		t.Fatalf("integrated row = %+v, want a unified pool of %d with no used figure", igpu, hostTotal)
+	const (
+		dedicated uint64 = 134217728
+		shared    uint64 = 51325829120
+	)
+	igpu := GPUInfo{Name: "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", VramBytes: dedicated, statsKey: "luid_igpu"}
+	markIntegrated(&igpu, dedicated, shared)
+	if igpu.MemoryPool != noderec.GPUMemoryPoolUnified || igpu.VramBytes != dedicated+shared || !igpu.usedIncludesShared {
+		t.Fatalf("integrated row = %+v, want a unified pool of %d counting shared usage", igpu, dedicated+shared)
 	}
 	// Integrated is not "not inference-ready": that is a separate claim this
 	// classification does not make.
@@ -83,34 +86,82 @@ func TestMarkIntegratedPublishesThePool(t *testing.T) {
 
 	dgpu := GPUInfo{Name: "NVIDIA GeForce RTX 5060", VramBytes: 8279556096, statsKey: "luid_dgpu"}
 	snap := statsSnapshot{GPU: map[string]gpuStat{
-		"luid_igpu": {UtilizationPct: 3, VRAMUsed: 0},
-		"luid_dgpu": {UtilizationPct: 71, VRAMUsed: 6209523712},
+		"luid_igpu": {UtilizationPct: 3, VRAMUsed: 0, SharedUsed: 8450048, SharedUsedKnown: true},
+		// A discrete card's Shared Usage (driver staging in system RAM) is
+		// not part of its VRAM and must not be added to it.
+		"luid_dgpu": {UtilizationPct: 71, VRAMUsed: 6209523712, SharedUsed: 146440192, SharedUsedKnown: true},
 	}}
-	_, raw := buildResponseDecode(t, []GPUInfo{dgpu, igpu}, nil, hostTotal, snap)
+	_, raw := buildResponseDecode(t, []GPUInfo{dgpu, igpu}, nil, 0, snap)
 	rows, _ := raw["GPUs"].([]any)
 	d, _ := rows[0].(map[string]any)
 	i, _ := rows[1].(map[string]any)
 	if _, present := d["memory_pool"]; present || d["vram_used_bytes"] != float64(6209523712) || d["vram_bytes"] != float64(8279556096) {
 		t.Errorf("discrete row changed: %v", d)
 	}
-	if i["memory_pool"] != noderec.GPUMemoryPoolUnified || i["vram_bytes"] != float64(hostTotal) {
-		t.Errorf("integrated row = %v, want memory_pool unified and vram_bytes %d", i, hostTotal)
+	if i["memory_pool"] != noderec.GPUMemoryPoolUnified || i["vram_bytes"] != float64(dedicated+shared) {
+		t.Errorf("integrated row = %v, want memory_pool unified and vram_bytes %d", i, dedicated+shared)
 	}
-	if _, present := i["vram_used_bytes"]; present {
-		t.Errorf("integrated row carries vram_used_bytes: %v", i)
-	}
-	// Same ceiling as memory.total_bytes: one figure, one base.
-	mem, _ := raw["memory"].(map[string]any)
-	if mem["total_bytes"] != i["vram_bytes"] {
-		t.Errorf("memory.total_bytes %v != integrated ceiling %v", mem["total_bytes"], i["vram_bytes"])
+	if i["vram_used_bytes"] != float64(8450048) {
+		t.Errorf("integrated vram_used_bytes = %v, want dedicated 0 + shared 8450048", i["vram_used_bytes"])
 	}
 
-	// A host whose memory total could not be read keeps DXGI's figure rather
-	// than a zero ceiling.
-	unknown := GPUInfo{VramBytes: 128 << 20}
-	markIntegrated(&unknown, 0)
-	if unknown.VramBytes != 128<<20 || unknown.MemoryPool != noderec.GPUMemoryPoolUnified {
-		t.Errorf("row with no host total = %+v, want DXGI's 128 MB kept, still unified", unknown)
+	// Without a Shared Usage sample the dedicated half alone would understate
+	// the pool's use, so no used figure is published.
+	noShared := statsSnapshot{GPU: map[string]gpuStat{"luid_igpu": {UtilizationPct: 3, VRAMUsed: 4096}}}
+	_, raw = buildResponseDecode(t, []GPUInfo{igpu}, nil, 0, noShared)
+	rows, _ = raw["GPUs"].([]any)
+	if r, _ := rows[0].(map[string]any); r["vram_used_bytes"] != nil {
+		t.Errorf("integrated row without a Shared Usage sample carries vram_used_bytes %v", r["vram_used_bytes"])
+	}
+}
+
+// TestMarkIntegratedKeepsAnAPUCarveOut is the reviewer's case: a 128 GB APU
+// with 96 GB set aside for graphics. GlobalMemoryStatusEx's TotalPhys excludes
+// that carve-out (~32 GB), so using the host total as the ceiling would lose
+// the 96 GB; dedicated + shared keeps it, and the used figure keeps counting
+// the carve-out's live Dedicated Usage.
+func TestMarkIntegratedKeepsAnAPUCarveOut(t *testing.T) {
+	const (
+		carveOut  uint64 = 96 << 30
+		totalPhys uint64 = 32 << 30
+		shared    uint64 = totalPhys / 2 // Windows' default shared limit
+	)
+	apu := GPUInfo{Name: "AMD Radeon 8060S (Strix Halo, RDNA 3.5)", VramBytes: carveOut, statsKey: "luid_apu"}
+	if !adapterIntegrated(0x1002, 0x1586, nil) {
+		t.Fatal("the Strix Halo id is not classified integrated")
+	}
+	markIntegrated(&apu, carveOut, shared)
+	if apu.VramBytes != carveOut+shared {
+		t.Fatalf("APU ceiling = %d, want carve-out %d + shared %d", apu.VramBytes, carveOut, shared)
+	}
+	if apu.VramBytes <= totalPhys {
+		t.Fatalf("APU ceiling %d is no larger than TotalPhys %d: the carve-out was lost", apu.VramBytes, totalPhys)
+	}
+	snap := statsSnapshot{GPU: map[string]gpuStat{
+		"luid_apu": {VRAMUsed: 40 << 30, SharedUsed: 1 << 30, SharedUsedKnown: true},
+	}}
+	typed, _ := buildResponseDecode(t, []GPUInfo{apu}, nil, totalPhys, snap)
+	if got := typed.GPUs[0].VramUsedBytes; got != 41<<30 {
+		t.Errorf("APU vram_used_bytes = %d, want 41 GiB (40 dedicated + 1 shared)", got)
+	}
+}
+
+// TestFoldSharedUsage pins the PDH fold: readings land on the lowercased LUID
+// key beside the dedicated figure, and junk instances or negative values are
+// not recorded as a known 0.
+func TestFoldSharedUsage(t *testing.T) {
+	out := map[string]gpuStat{"luid_0x00000000_0x0000f25e_phys_0": {VRAMUsed: 7}}
+	foldSharedUsage(out, map[string]int64{
+		"luid_0x00000000_0x0000F25E_phys_0": 8450048,
+		"luid_0x00000000_0x00001111_phys_0": -1,
+		"_Total":                            5,
+	})
+	got := out["luid_0x00000000_0x0000f25e_phys_0"]
+	if got.VRAMUsed != 7 || got.SharedUsed != 8450048 || !got.SharedUsedKnown {
+		t.Errorf("folded = %+v, want dedicated kept and shared 8450048 known", got)
+	}
+	if len(out) != 1 {
+		t.Errorf("fold recorded junk instances: %+v", out)
 	}
 }
 

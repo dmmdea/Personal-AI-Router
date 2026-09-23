@@ -19,14 +19,18 @@ import (
 // Integrated-adapter classification for the Windows inventory.
 //
 // DXGI reports every adapter's DedicatedVideoMemory, and for an integrated GPU
-// that figure is the firmware's stolen aperture — 128 MB on a UHD Graphics
-// 630 — while the device allocates out of shared system memory. Publishing it
-// as the row's VRAM had the card read "VRAM 0 B / 128 MB" for a device whose
-// reachable pool is most of the host's RAM, and the same part on Linux (where
-// the row has always been a unified pool) read differently from the same part
-// on Windows. An integrated row is now published the way the Linux Intel,
-// Rockchip and Apple rows are: MemoryPool unified, VramBytes the host's
-// memory total, and no used figure.
+// that figure is only part of its pool: the firmware's stolen aperture (128 MB
+// on a UHD Graphics 630) or an APU's carve-out, while the device also
+// allocates out of shared system memory up to SharedSystemMemory. Publishing
+// the dedicated part alone as "VRAM" had the card read "VRAM 0 B / 128 MB" for
+// a device whose reachable pool is most of the host's RAM. An integrated row
+// is now a unified pool whose ceiling is DedicatedVideoMemory +
+// SharedSystemMemory and whose used figure is PDH's Dedicated Usage + Shared
+// Usage — the same two halves the Linux AMD row adds up (mem_info_vram +
+// mem_info_gtt). The host's memory total is deliberately NOT the ceiling: it
+// excludes hardware-reserved memory, which is exactly where a carve-out lives,
+// so a 128 GB APU with 96 GB set aside for graphics would have shown a ~32 GB
+// pool and lost the 96 GB.
 //
 // Which adapters are integrated comes from the same shared table Linux uses
 // (gpunames.IntelDiscrete / gpunames.AMDAPU), so one PCI id gets one answer on
@@ -58,17 +62,13 @@ func adapterIntegrated(vendorID, deviceID uint32, osIntegrated func() (integrate
 }
 
 // markIntegrated turns a DXGI row into a unified-pool row: the ceiling is the
-// host's memory total (systemMemTotal, the same figure memory.total_bytes
-// carries) and the collector's Dedicated Usage is not published against it —
-// it counts only the stolen aperture, a fraction of what the device holds. A
-// host whose memory total could not be read keeps the DXGI figure rather than
-// publishing a zero ceiling.
-func markIntegrated(gpu *GPUInfo, memTotal uint64) {
+// adapter's dedicated memory plus the shared system memory it may map
+// (DXGI_ADAPTER_DESC1 DedicatedVideoMemory + SharedSystemMemory), and its used
+// figure becomes Dedicated Usage + Shared Usage (usedIncludesShared).
+func markIntegrated(gpu *GPUInfo, dedicated, shared uint64) {
 	gpu.MemoryPool = noderec.GPUMemoryPoolUnified
-	gpu.sharedUsageUnmeasured = true
-	if memTotal > 0 {
-		gpu.VramBytes = memTotal
-	}
+	gpu.usedIncludesShared = true
+	gpu.VramBytes = dedicated + shared
 }
 
 // IID_IDXCoreAdapterFactory = {78ee5945-c36e-4b13-a669-005dd11c0f06}

@@ -7,9 +7,12 @@ import "sync"
 
 // systemMemTotal is the host's memory total, read once and shared by every
 // consumer: memory.total_bytes in the response, and the VramBytes ceiling of
-// every unified-memory row (an Intel or AMD integrated GPU on Windows, an
-// Intel iGPU, a Mali GPU, an RKNPU or an nvidia UMA part on Linux). The number
-// does not change at runtime, and one read keeps those figures identical.
+// the Linux unified-memory rows that have no pool figure of their own (an
+// Intel iGPU, a Mali GPU, an RKNPU, an nvidia UMA part). The number does not
+// change at runtime, and one read keeps those figures identical. A Windows
+// integrated GPU does not use it: its pool is DXGI's dedicated + shared
+// memory (gpu_integrated_windows.go), because this total excludes the
+// firmware-reserved memory an APU's carve-out lives in.
 //
 // The total is on the SAME BASE as the collector's used figure, so used/total
 // is a true fraction and a reserved byte is never in one number but not the

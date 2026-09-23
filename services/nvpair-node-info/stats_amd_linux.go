@@ -74,12 +74,21 @@ const (
 // reports the sample time the snapshot should carry. A usable utilization
 // reading is fresh GPU telemetry exactly as an nvidia-smi one is, so it
 // advances sampledAt (and with it TelemetryValid); anything less leaves the
-// caller's value untouched. This is the single line stats_linux.go adds.
-func amdSampleAt(out map[string]gpuStat, sampledAt time.Time) time.Time {
-	if decodeAMD(drmClassDir, out) {
-		return time.Now()
+// caller's value untouched. The same pass reports an APU's package power
+// (see amdAPUPackageWatts), so the collector reads /sys/class/drm once a tick.
+func amdSampleAt(out map[string]gpuStat, sampledAt time.Time) (time.Time, amdPackagePower) {
+	sampled, pkg := decodeAMDPass(drmClassDir, out)
+	if sampled {
+		return time.Now(), pkg
 	}
-	return sampledAt
+	return sampledAt, pkg
+}
+
+// amdPackagePower is an APU's PPT reading, the package's draw; ok is false on
+// a host with no APU or an APU with no power input.
+type amdPackagePower struct {
+	watts float64
+	ok    bool
 }
 
 // decodeAMD samples every AMD card under drmRoot into out, keyed by the same
@@ -89,7 +98,13 @@ func amdSampleAt(out map[string]gpuStat, sampledAt time.Time) time.Time {
 // left out of the map entirely, so a transient sysfs failure keeps the row's
 // previous values rather than publishing zeros over them.
 func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
-	sampled := false
+	sampled, _ := decodeAMDPass(drmRoot, out)
+	return sampled
+}
+
+// decodeAMDPass is decodeAMD plus the first APU's package power, read in the
+// same walk over the cards.
+func decodeAMDPass(drmRoot string, out map[string]gpuStat) (sampled bool, pkg amdPackagePower) {
 	for _, c := range listAMDCards(drmRoot) {
 		var stat gpuStat
 		any := false
@@ -106,19 +121,21 @@ func decodeAMD(drmRoot string, out map[string]gpuStat) bool {
 			stat.TemperatureC = temp
 			any = true
 		}
-		// An APU's PPT is the package, not the GPU: amdAPUPackageWatts puts
-		// it on the CPU row instead.
-		if !c.unifiedPool {
-			if watts, ok := amdPowerWatts(c.deviceDir); ok {
+		// An APU's PPT is the package, not the GPU: it goes to the CPU row
+		// (amdAPUPackageWatts) and the GPU row carries no watts.
+		if watts, ok := amdPowerWatts(c.deviceDir); ok {
+			if !c.unifiedPool {
 				stat.PowerWatts = watts
 				any = true
+			} else if !pkg.ok {
+				pkg = amdPackagePower{watts: watts, ok: true}
 			}
 		}
 		if any {
 			out[c.statsKey] = stat
 		}
 	}
-	return sampled
+	return sampled, pkg
 }
 
 // amdBusyPercent reads gpu_busy_percent. Out-of-range values are rejected:
@@ -224,13 +241,8 @@ func amdHwmonDirs(deviceDir string) []string {
 // CPU cores on these parts and the per-core power unit has not been calibrated
 // against RAPL, so a subtraction would be a guess.
 func amdAPUPackageWatts(drmRoot string) (float64, bool) {
-	for _, c := range listAMDCards(drmRoot) {
-		if !c.unifiedPool {
-			continue
-		}
-		return amdPowerWatts(c.deviceDir)
-	}
-	return 0, false
+	_, pkg := decodeAMDPass(drmRoot, map[string]gpuStat{})
+	return pkg.watts, pkg.ok
 }
 
 // amdPowerWatts returns the card's socket power in whole watts, from the

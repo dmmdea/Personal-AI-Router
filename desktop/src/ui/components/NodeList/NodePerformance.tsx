@@ -54,9 +54,14 @@ export default function NodePerformance({
         // colors and labels on the right GPU.
         const gpuRowById = new Map(gpuRows.map((gpu, index) => [gpu.id, { gpu, index }]))
 
-        // Add GPU utilization datasets (cycling through color palette)
+        // Add GPU utilization datasets (cycling through color palette). A
+        // series whose row is not in this node's topology (a frame that
+        // arrived before or after the row list changed) is skipped rather
+        // than drawn as "GPU 0" in GPU 0's colour.
         nodeMetrics.gpuUtilization.forEach(series => {
-            const gpuIndex = gpuRowById.get(series.id)?.index ?? 0
+            const row = gpuRowById.get(series.id)
+            if (!row) return
+            const gpuIndex = row.index
             result.push({
                 data: series.data,
                 label: gpuCount > 1 ? `GPU ${gpuIndex}` : 'GPU',
@@ -91,11 +96,12 @@ export default function NodePerformance({
         // shift the remaining series onto another GPU's color.
         nodeMetrics.gpuVramUsage.forEach(series => {
             const row = gpuRowById.get(series.id)
-            const gpuIndex = row?.index ?? 0
+            if (!row) return
+            const gpuIndex = row.index
             // "Shared" for a pool the device splits with the host, so the
             // plotted line and the hardware line beside it agree on what the
             // device actually owns.
-            const label = row ? memoryLabel(row.gpu) : 'VRAM'
+            const label = memoryLabel(row.gpu)
             result.push({
                 data: series.data,
                 label: gpuCount > 1 ? `${label} ${gpuIndex}` : label,

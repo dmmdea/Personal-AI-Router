@@ -34,6 +34,12 @@ type gpuStat struct {
 	// only for the rows they feed (GPUInfo.utilizationNeedsSample); every other
 	// source publishes a stat only when it read something.
 	UtilizationKnown bool
+	// SharedUsed is the bytes of shared system memory the adapter has
+	// allocated (Windows PDH \GPU Adapter Memory\Shared Usage), valid when
+	// SharedUsedKnown. Only rows with GPUInfo.usedIncludesShared read it: an
+	// integrated GPU, whose pool is its dedicated aperture plus shared memory.
+	SharedUsed      uint64
+	SharedUsedKnown bool
 }
 
 // statsSnapshot is the dynamic bundle the HTTP handler reads without locking.
@@ -195,4 +201,26 @@ func aggregateUtilization(items map[string]float64) map[string]uint32 {
 		out[luid] = uint32(math.Round(maxPct))
 	}
 	return out
+}
+
+// foldSharedUsage adds PDH \GPU Adapter Memory(*)\Shared Usage readings to
+// the per-adapter map, keyed the way the Dedicated Usage fold keys them (the
+// lowercased "luid_..." instance name). A negative reading or an instance that
+// is not an adapter LUID is skipped rather than recorded as 0 bytes used.
+// Platform-neutral so it is testable anywhere; only the Windows collector
+// calls it.
+func foldSharedUsage(out map[string]gpuStat, readings map[string]int64) {
+	for name, v := range readings {
+		if v < 0 {
+			continue
+		}
+		key := strings.ToLower(name)
+		if !strings.HasPrefix(key, "luid_") {
+			continue
+		}
+		s := out[key]
+		s.SharedUsed = uint64(v)
+		s.SharedUsedKnown = true
+		out[key] = s
+	}
 }

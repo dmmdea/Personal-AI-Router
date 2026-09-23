@@ -79,6 +79,7 @@ import (
 
 const (
 	pdhCounterPathDedicated = `\GPU Adapter Memory(*)\Dedicated Usage`
+	pdhCounterPathShared    = `\GPU Adapter Memory(*)\Shared Usage`
 	pdhCounterPathEngine    = `\GPU Engine(*)\Utilization Percentage`
 	pdhCounterPathCPU       = `\Processor(_Total)\% Processor Time`
 
@@ -135,6 +136,7 @@ var (
 	// isn't present now, it isn't coming back without a reboot, and we
 	// don't want to log-spam on every retry attempt during startup.
 	pdhVRAMUnavailable   atomic.Bool
+	pdhSharedUnavailable atomic.Bool
 	pdhEngineUnavailable atomic.Bool
 	pdhCPUUnavailable    atomic.Bool
 )
@@ -198,9 +200,11 @@ func luidKey(low uint32, high int32) string {
 type statsCollector struct {
 	query         uintptr
 	vramCounter   uintptr
+	sharedCounter uintptr
 	engineCounter uintptr
 	cpuCounter    uintptr
 	hasVRAM       bool
+	hasShared     bool
 	hasEngine     bool
 	hasCPU        bool
 
@@ -418,6 +422,12 @@ func (c *statsCollector) open() error {
 		c.vramCounter = ctr
 		c.hasVRAM = true
 	}
+	// Shared Usage is read for every adapter but published only for an
+	// integrated one (GPUInfo.usedIncludesShared), whose pool it half-makes.
+	if ctr, ok := c.addCounter(pdhCounterPathShared, &pdhSharedUnavailable); ok {
+		c.sharedCounter = ctr
+		c.hasShared = true
+	}
 	if ctr, ok := c.addCounter(pdhCounterPathEngine, &pdhEngineUnavailable); ok {
 		c.engineCounter = ctr
 		c.hasEngine = true
@@ -427,7 +437,7 @@ func (c *statsCollector) open() error {
 		c.hasCPU = true
 	}
 
-	if !c.hasVRAM && !c.hasEngine && !c.hasCPU {
+	if !c.hasVRAM && !c.hasShared && !c.hasEngine && !c.hasCPU {
 		procPdhCloseQuery.Call(c.query)
 		c.query = 0
 		return fmt.Errorf("no performance counters available on this host")
@@ -576,6 +586,9 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 			s.VRAMUsed = uint64(v)
 			out[lname] = s
 		}
+	}
+	if c.hasShared {
+		foldSharedUsage(out, readCounterLarge(c.sharedCounter))
 	}
 	utilizationSamples := 0
 	if c.hasEngine {

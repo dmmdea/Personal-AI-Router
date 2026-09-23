@@ -93,13 +93,13 @@ func TestMergeGPUInventoryMovedRowTakesRedetectedIdentity(t *testing.T) {
 	// The capacity's meaning moves with it: an integrated adapter's pool
 	// ceiling and its no-used-figure rule come along, and a discrete card that
 	// replaces one drops them.
-	igpu := GPUInfo{Name: "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", VramBytes: 64 << 30, MemoryPool: "unified", sharedUsageUnmeasured: true, statsKey: "luid_C", hardwareKey: "pci:00:02.0"}
-	got = mergeGPUInventory([]GPUInfo{boot}, []GPUInfo{{Name: igpu.Name, VramBytes: igpu.VramBytes, MemoryPool: igpu.MemoryPool, sharedUsageUnmeasured: true, statsKey: "luid_D", hardwareKey: "pci:04:00.0"}}, nil)
-	if got[0].MemoryPool != "unified" || !got[0].sharedUsageUnmeasured {
+	igpu := GPUInfo{Name: "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)", VramBytes: 64 << 30, MemoryPool: "unified", usedIncludesShared: true, statsKey: "luid_C", hardwareKey: "pci:00:02.0"}
+	got = mergeGPUInventory([]GPUInfo{boot}, []GPUInfo{{Name: igpu.Name, VramBytes: igpu.VramBytes, MemoryPool: igpu.MemoryPool, usedIncludesShared: true, statsKey: "luid_D", hardwareKey: "pci:04:00.0"}}, nil)
+	if got[0].MemoryPool != "unified" || !got[0].usedIncludesShared {
 		t.Errorf("row moved onto an integrated adapter = %+v, want its unified pool", got[0])
 	}
 	got = mergeGPUInventory([]GPUInfo{igpu}, []GPUInfo{{Name: swapped.Name, VramBytes: swapped.VramBytes, statsKey: "luid_E", hardwareKey: "pci:00:02.0"}}, nil)
-	if got[0].MemoryPool != "" || got[0].sharedUsageUnmeasured {
+	if got[0].MemoryPool != "" || got[0].usedIncludesShared {
 		t.Errorf("row moved onto a discrete card = %+v, want no pool marker", got[0])
 	}
 }
@@ -211,5 +211,27 @@ func TestBuildResponseReissuedKeyIsOneRow(t *testing.T) {
 	g := got.GPUs[0]
 	if g.VramUsedBytes != 422301696 || g.TemperatureCelsius != 56 || g.PowerWatts != 19 {
 		t.Fatalf("row = %+v, want VRAM used + temperature + power on the one row", g)
+	}
+}
+
+// TestMergeGPUInventoryAdoptsALaterIntegratedClassification: when the OS could
+// not classify an adapter at boot (DXCore unanswered), the startup row is
+// discrete. A re-detection that does classify it integrated must reach the
+// response under the same statsKey, pool ceiling included; a later pass that
+// again cannot say must not undo it.
+func TestMergeGPUInventoryAdoptsALaterIntegratedClassification(t *testing.T) {
+	boot := GPUInfo{Name: "Intel Graphics (device 0xffff)", VramBytes: 128 << 20, statsKey: "luid_A", hardwareKey: "pci:00:02.0"}
+	classified := GPUInfo{Name: boot.Name, VramBytes: 48 << 30, MemoryPool: "unified", usedIncludesShared: true, statsKey: "luid_A", hardwareKey: "pci:00:02.0"}
+
+	got := mergeGPUInventory([]GPUInfo{boot}, []GPUInfo{classified}, nil)
+	if len(got) != 1 || got[0].MemoryPool != "unified" || !got[0].usedIncludesShared || got[0].VramBytes != 48<<30 {
+		t.Fatalf("merged = %+v, want the startup row to take the unified pool and its ceiling", mergeRows(got))
+	}
+
+	unifiedBoot := classified
+	unanswered := boot
+	got = mergeGPUInventory([]GPUInfo{unifiedBoot}, []GPUInfo{unanswered}, nil)
+	if got[0].MemoryPool != "unified" || got[0].VramBytes != 48<<30 {
+		t.Fatalf("merged = %+v, want a later unanswered pass to leave the unified row alone", mergeRows(got))
 	}
 }

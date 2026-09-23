@@ -113,14 +113,16 @@ type GPUInfo struct {
 	// framebuffer, which is why those rows no longer set this flag.
 	usesSystemMemoryUsage bool `json:"-"`
 
-	// sharedUsageUnmeasured drops the collector's used figure for a unified
-	// row whose only per-device counter covers part of its pool. A Windows
-	// integrated GPU is the case: PDH's Dedicated Usage counts the small
-	// stolen aperture (128 MB on a UHD 630) while the device allocates out of
-	// shared system memory, so that figure against a system-sized ceiling is a
-	// fraction of what the device holds. The row publishes its ceiling and no
-	// used figure, as the Linux Intel rows do.
-	sharedUsageUnmeasured bool `json:"-"`
+	// usedIncludesShared marks a unified row whose pool is its dedicated
+	// memory plus the shared system memory it may map, so its used figure is
+	// the two usage counters summed. A Windows integrated GPU is the case:
+	// VramBytes is DXGI's DedicatedVideoMemory + SharedSystemMemory (the
+	// stolen aperture or an APU's firmware carve-out, plus the shared limit)
+	// and the used figure is PDH's Dedicated Usage + Shared Usage — the
+	// Windows counterpart of amdgpu's vram + gtt on Linux. With no Shared
+	// Usage sample the row publishes no used figure rather than the dedicated
+	// half alone.
+	usedIncludesShared bool `json:"-"`
 
 	// utilizationNeedsSample marks a row whose utilization comes from a sampler
 	// that says whether it read one (gpuStat.UtilizationKnown): the Rockchip
@@ -288,7 +290,13 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 			gpu.UtilizationUnavailable = true
 		}
 		if ok {
-			if !gpu.usesSystemMemoryUsage && !gpu.sharedUsageUnmeasured {
+			switch {
+			case gpu.usesSystemMemoryUsage:
+			case gpu.usedIncludesShared:
+				if s.SharedUsedKnown {
+					gpu.VramUsedBytes = s.VRAMUsed + s.SharedUsed
+				}
+			default:
 				gpu.VramUsedBytes = s.VRAMUsed
 			}
 			gpu.UtilizationPercent = s.UtilizationPct
@@ -398,7 +406,7 @@ func mergeGPUInventory(static, recovered []GPUInfo, hardwareKeys map[string]stri
 				// pool ceiling must not be published as a discrete card's VRAM,
 				// nor the reverse.
 				merged[index].MemoryPool = gpu.MemoryPool
-				merged[index].sharedUsageUnmeasured = gpu.sharedUsageUnmeasured
+				merged[index].usedIncludesShared = gpu.usedIncludesShared
 				byStatsKey[gpu.statsKey] = index
 			}
 		}
@@ -408,6 +416,16 @@ func mergeGPUInventory(static, recovered []GPUInfo, hardwareKeys map[string]stri
 			}
 			if merged[index].VramBytes == 0 {
 				merged[index].VramBytes = gpu.VramBytes
+			}
+			// A re-detection that classifies the adapter as a shared pool
+			// wins over a startup row that did not (the OS could not answer
+			// at boot), and brings the pool's ceiling with it. The reverse is
+			// not taken: "could not say" on a later pass is no evidence that
+			// the adapter stopped being integrated.
+			if gpu.MemoryPool != "" && merged[index].MemoryPool == "" {
+				merged[index].MemoryPool = gpu.MemoryPool
+				merged[index].usedIncludesShared = gpu.usedIncludesShared
+				merged[index].VramBytes = cmp.Or(gpu.VramBytes, merged[index].VramBytes)
 			}
 			continue
 		}
