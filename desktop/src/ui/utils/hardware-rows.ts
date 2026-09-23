@@ -8,7 +8,9 @@
  * inference accelerators (`kind: "npu"`), which genuinely cannot report some of
  * what a GPU reports. A row that prints "Usage 0%" for a device with no busy counter
  * is not a neutral placeholder: it reads as "idle", which is a claim, and a
- * wrong one.
+ * wrong one. Such a row says so itself (`utilizationUnavailable`), because an
+ * absent utilization cannot: node-info omits a measured idle 0 as well, so
+ * the flag, not the absence, is what turns the figure into "—" (usagePercent).
  *
  * The same applies to what a line SAYS. Several devices here have no memory of
  * their own — an integrated GPU, an Arm Mali GPU, an RKNPU, an Apple Silicon
@@ -36,6 +38,8 @@ export interface HardwareRow {
      * than the device's own memory; absent on a discrete card.
      */
     memoryPool?: string
+    /** True when the node says the device has no busy counter it can read. */
+    utilizationUnavailable?: boolean
 }
 
 /** The inference-accelerator row's kind, as node-info spells it. */
@@ -81,11 +85,13 @@ export function memoryLabel(row: HardwareRow): string {
  * shared-pool device that measures nothing — an Intel iGPU, a Mali GPU, an
  * RKNPU — publishes only a ceiling, and a ceiling on its own is a static
  * number that never moves: it sits among live readings looking like one,
- * while saying nothing about what the device is doing. So such a row now
- * shows usage and temperature and no memory line, and a shared pool the
- * device DOES measure (an AMD APU, an Apple Silicon GPU, a DGX Spark part)
- * keeps the full "Shared <used> / <total>". Dedicated rows are untouched:
- * their used figure is always a number, 0 included, which is a real reading.
+ * while saying nothing about what the device is doing. So such a row shows no
+ * memory line — only its usage line (a figure, or "—" where the device has no
+ * busy counter either; see usagePercent) and its temperature — and a shared
+ * pool the device DOES measure (an AMD APU, an Apple Silicon GPU, a DGX Spark
+ * part) keeps the full "Shared <used> / <total>". Dedicated rows are
+ * untouched: their used figure is always a number, 0 included, which is a
+ * real reading.
  */
 export function showsMemoryLine(row: HardwareRow, usedBytes: number | null): usedBytes is number {
     return usedBytes !== null && showsVram(row)
@@ -161,4 +167,28 @@ export function cpuThermalSuffix(temperatureC: number, powerWatts: number): stri
 export function memoryUsedBytes(row: HardwareRow, usagePercent: number | null): number | null {
     if (usagePercent === null) return isUnifiedMemory(row) ? null : 0
     return Math.floor((row.vramTotal * usagePercent) / 100)
+}
+
+/**
+ * A row's busy percentage from its utilization series' latest value, or null
+ * when the device has no busy counter.
+ *
+ * The row's own flag decides, never a missing series: node-info omits a
+ * measured idle 0 exactly as it omits an unmeasured one, and a row from a node
+ * that predates the flag must keep reading 0 % when idle. A missing series on
+ * an unflagged row is therefore "no sample yet", which reads 0 as it always
+ * has.
+ */
+export function usagePercent(row: HardwareRow, latest: number | null): number | null {
+    if (row.utilizationUnavailable) return null
+    return latest ?? 0
+}
+
+/**
+ * The value on a row's Usage line: "37%", or "—" when the device has no busy
+ * counter. Floored, because the services publish whole percents and the chart
+ * history can hold an interpolated fraction.
+ */
+export function formatUsage(percent: number | null): string {
+    return percent === null ? '—' : `${Math.floor(percent)}%`
 }

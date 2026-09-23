@@ -11,11 +11,13 @@ import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
 import {
     cpuThermalSuffix,
+    formatUsage,
     memoryLabel,
     memoryLineValue,
     memoryUsedBytes,
     showsMemoryLine,
-    thermalLine
+    thermalLine,
+    usagePercent
 } from '@/ui/utils/hardware-rows'
 
 export default function NodePerformance({
@@ -43,21 +45,28 @@ export default function NodePerformance({
     const datasets = useMemo(() => {
         if (!nodeMetrics) return []
 
-        const gpuCount = nodeMetrics.gpuUtilization.length
+        const gpuCount = gpuRows.length
         const result: MetricDataset[] = []
-        // The node's GPU rows by id. The utilization series still follows this
-        // order positionally; the VRAM series no longer can, and it also needs
-        // the row itself to know what to call the line.
+        // The node's GPU rows by id. Neither series array follows this order
+        // positionally any more — the bridge emits no utilization series for a
+        // row with no busy counter and no VRAM series for an unmeasured shared
+        // pool — so both are keyed back to their row, whose position keeps the
+        // colors and labels on the right GPU.
         const gpuRowById = new Map(gpuRows.map((gpu, index) => [gpu.id, { gpu, index }]))
 
-        // Add GPU utilization datasets (cycling through color palette)
-        nodeMetrics.gpuUtilization.forEach((gpu, index) => {
-            const color = getGpuColor(index)
+        // Add GPU utilization datasets (cycling through color palette). A
+        // series whose row is not in this node's topology (a frame that
+        // arrived before or after the row list changed) is skipped rather
+        // than drawn as "GPU 0" in GPU 0's colour.
+        nodeMetrics.gpuUtilization.forEach(series => {
+            const row = gpuRowById.get(series.id)
+            if (!row) return
+            const gpuIndex = row.index
             result.push({
-                data: gpu.data,
-                label: gpuCount > 1 ? `GPU ${index}` : 'GPU',
-                color,
-                key: `gpu-${gpu.id}`
+                data: series.data,
+                label: gpuCount > 1 ? `GPU ${gpuIndex}` : 'GPU',
+                color: getGpuColor(gpuIndex),
+                key: `gpu-${series.id}`
             })
         })
 
@@ -87,11 +96,12 @@ export default function NodePerformance({
         // shift the remaining series onto another GPU's color.
         nodeMetrics.gpuVramUsage.forEach(series => {
             const row = gpuRowById.get(series.id)
-            const gpuIndex = row?.index ?? 0
+            if (!row) return
+            const gpuIndex = row.index
             // "Shared" for a pool the device splits with the host, so the
             // plotted line and the hardware line beside it agree on what the
             // device actually owns.
-            const label = row ? memoryLabel(row.gpu) : 'VRAM'
+            const label = memoryLabel(row.gpu)
             result.push({
                 data: series.data,
                 label: gpuCount > 1 ? `${label} ${gpuIndex}` : label,
@@ -120,18 +130,22 @@ export default function NodePerformance({
             // Detailed view lists every detected GPU (incl. iGPUs); only the
             // radial filters to inference-ready GPUs (via inferenceHardwareIds).
             gpus: node.topology.gpus.map((gpu, index) => {
-                const gpuUtilData = nodeMetrics?.gpuUtilization[index]
                 // By id, not by index: the bridge emits no VRAM series for a
-                // shared-pool row the node could not measure, so this array no
-                // longer lines up with topology.gpus and positional lookup
-                // would hand one GPU's memory usage to the next one along.
+                // shared-pool row the node could not measure, and no
+                // utilization series for a row with no busy counter, so
+                // neither array lines up with topology.gpus and positional
+                // lookup would hand one GPU's figures to the next one along.
+                const gpuUtilData = nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)
                 const gpuVramData = nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)
 
                 return {
                     id: gpu.id,
                     name: gpu.name,
                     vramTotal: gpu.vramTotal,
-                    utilization: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
+                    utilization: usagePercent(
+                        gpu,
+                        gpuUtilData ? getLatestValue(gpuUtilData.data) : null
+                    ),
                     vramUsedBytes: memoryUsedBytes(
                         gpu,
                         gpuVramData ? getLatestValue(gpuVramData.data) : null
@@ -224,13 +238,23 @@ export default function NodePerformance({
                                 </Text>
 
                                 <Stack gap="1">
-                                    {/* GPU Utilization */}
+                                    {/* GPU Utilization — "—" and not clickable for a
+                                        device with no busy counter: it has no series
+                                        to solo, and "0%" would read as idle. */}
                                     {
                                         <Flex
                                             align="center"
                                             gap="2"
-                                            className="cursor-pointer"
-                                            onClick={() => handleLegendClick(`gpu-${gpu.id}`)}
+                                            className={
+                                                gpu.utilization === null
+                                                    ? undefined
+                                                    : 'cursor-pointer'
+                                            }
+                                            onClick={
+                                                gpu.utilization === null
+                                                    ? undefined
+                                                    : () => handleLegendClick(`gpu-${gpu.id}`)
+                                            }
                                         >
                                             <div
                                                 className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
@@ -260,7 +284,7 @@ export default function NodePerformance({
                                             >
                                                 <Text kind="body/regular/sm">Usage</Text>
                                                 <Text kind="body/regular/sm">
-                                                    {Math.floor(gpu.utilization)}%
+                                                    {formatUsage(gpu.utilization)}
                                                 </Text>
                                             </Flex>
                                         </Flex>

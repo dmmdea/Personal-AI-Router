@@ -219,6 +219,18 @@ interface ModularGpu {
     // it is a pool shared with the host. Carried through untouched for the
     // same reason as kind.
     memoryPool: string
+    // True when the node says the device has no busy counter it can read
+    // (`utilization_unavailable`): a Hailo module, a Linux Intel GPU, a
+    // Rockchip device whose counter is unreadable. utilizationPercent is then
+    // 0 by default, not by measurement, and the row gets no usage series. A
+    // node that predates the field never sends it, and its rows keep reading
+    // an absent utilization as 0 %, which on those rows was a measured idle.
+    utilizationUnavailable: boolean
+    // The node's `inference_ready` flag: false on a device no engine can use
+    // (a Mali GPU, an NPU, a Linux Intel iGPU), null when the node makes no
+    // claim — every row from a node that predates the field, and every row a
+    // node has no reason to flag.
+    inferenceReady: boolean | null
 }
 
 interface ModularCpu {
@@ -254,6 +266,10 @@ function numberValue(value: JsonValue | undefined): number {
 
 function booleanValue(value: JsonValue | undefined): boolean {
     return typeof value === 'boolean' ? value : false
+}
+
+function nullableBooleanValue(value: JsonValue | undefined): boolean | null {
+    return typeof value === 'boolean' ? value : null
 }
 
 function stringArrayValue(value: JsonValue | undefined): string[] {
@@ -515,6 +531,35 @@ function removeSource(sources: BrokerNodeSource[], source: BrokerNodeSource): Br
     return sources.filter(entry => entry !== source)
 }
 
+/**
+ * The id a node's GPU row goes by everywhere downstream of this bridge: the
+ * topology row, every metric series and the inference-ready list. Positional,
+ * after gpuArrayValue's sort, which is why node-info cannot name these ids
+ * itself and says per row what it knows instead.
+ */
+function gpuRowId(nodeId: string, index: number): string {
+    return `${nodeId}:gpu:${index}`
+}
+
+/**
+ * The inference-ready ids a node's rows imply, for a node that sends no
+ * `inference_hardware_ids` list: every row except those the node marked
+ * `inference_ready: false`. undefined when no row carries the flag at all, so
+ * a node that predates it keeps the "no readiness reported" meaning (show
+ * every GPU) rather than being read as "every GPU is ready" by accident of
+ * this function.
+ *
+ * This is what keeps a board whose only devices are a Mali GPU and an NPU —
+ * neither of which any engine runs on — from charting them as its GPUs: the
+ * list comes out empty and the card falls back to CPU and RAM.
+ */
+function inferenceReadyIds(nodeId: string, gpus: ModularGpu[]): string[] | undefined {
+    if (!gpus.some(gpu => gpu.inferenceReady !== null)) return undefined
+    return gpus.flatMap((gpu, index) =>
+        gpu.inferenceReady === false ? [] : [gpuRowId(nodeId, index)]
+    )
+}
+
 function nvidiaGpuRank(gpu: ModularGpu): number {
     return gpu.name.toLowerCase().includes('nvidia') ? 0 : 1
 }
@@ -533,7 +578,9 @@ function gpuArrayValue(value: JsonValue | undefined): ModularGpu[] {
             temperatureCelsius: numberValue(obj.temperature_celsius),
             powerWatts: numberValue(obj.power_watts),
             kind: stringValue(obj.kind),
-            memoryPool: stringValue(obj.memory_pool)
+            memoryPool: stringValue(obj.memory_pool),
+            utilizationUnavailable: booleanValue(obj.utilization_unavailable),
+            inferenceReady: nullableBooleanValue(obj.inference_ready)
         })
     }
     return gpus.sort((left, right) => nvidiaGpuRank(left) - nvidiaGpuRank(right))
@@ -593,7 +640,9 @@ function sameGpu(left: ModularGpu, right: ModularGpu): boolean {
         left.temperatureCelsius === right.temperatureCelsius &&
         left.powerWatts === right.powerWatts &&
         left.kind === right.kind &&
-        left.memoryPool === right.memoryPool
+        left.memoryPool === right.memoryPool &&
+        left.utilizationUnavailable === right.utilizationUnavailable &&
+        left.inferenceReady === right.inferenceReady
     )
 }
 
@@ -689,11 +738,12 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
                 threads: node.cpu?.cores ?? 0
             },
             gpus: node.gpus.map((gpu, index) => ({
-                id: `${node.id}:gpu:${index}`,
+                id: gpuRowId(node.id, index),
                 name: gpu.name,
                 vramTotal: gpu.vramBytes,
                 ...(gpu.kind ? { kind: gpu.kind } : {}),
-                ...(gpu.memoryPool ? { memoryPool: gpu.memoryPool } : {})
+                ...(gpu.memoryPool ? { memoryPool: gpu.memoryPool } : {}),
+                ...(gpu.utilizationUnavailable ? { utilizationUnavailable: true } : {})
             })),
             ram: node.memory?.totalBytes ?? 0,
             storage: [],
@@ -716,10 +766,15 @@ function toMetrics(node: ModularNode): NodeItemMetrics {
         timestamp: Date.now(),
         cpuUtilization: node.cpu?.utilizationPercent ?? 0,
         memoryUsage,
-        gpuUtilization: node.gpus.map((gpu, index) => ({
-            id: `${node.id}:gpu:${index}`,
-            value: gpu.utilizationPercent
-        })),
+        // A row the node says has no busy counter gets no series, for the
+        // same reason as the VRAM rule below: a flat 0 % line is a claim that
+        // the device is idle, and nobody measured it. Keyed by id, so
+        // consumers look a row's series up rather than indexing this array.
+        gpuUtilization: node.gpus.flatMap((gpu, index) =>
+            gpu.utilizationUnavailable
+                ? []
+                : [{ id: gpuRowId(node.id, index), value: gpu.utilizationPercent }]
+        ),
         // A row whose node reports NO used figure gets no series at all,
         // rather than a series of zeroes. node-info omits vram_used_bytes for
         // a shared-pool device nothing can measure (an Intel iGPU, a Mali GPU,
@@ -733,21 +788,21 @@ function toMetrics(node: ModularNode): NodeItemMetrics {
             reportsMemoryUsage(gpu)
                 ? [
                       {
-                          id: `${node.id}:gpu:${index}`,
+                          id: gpuRowId(node.id, index),
                           value: gpu.vramBytes > 0 ? (gpu.vramUsedBytes / gpu.vramBytes) * 100 : 0
                       }
                   ]
                 : []
         ),
         gpuTemperature: node.gpus.map((gpu, index) => ({
-            id: `${node.id}:gpu:${index}`,
+            id: gpuRowId(node.id, index),
             value: gpu.temperatureCelsius
         })),
         // Power is a reading, not a chart series, and it travels for every
         // row: a 0 here means the device has no meter, which the UI renders
         // as no figure at all rather than as "0 W".
         gpuPower: node.gpus.map((gpu, index) => ({
-            id: `${node.id}:gpu:${index}`,
+            id: gpuRowId(node.id, index),
             value: gpu.powerWatts
         })),
         cpuTemperature: node.cpu?.temperatureCelsius ?? 0,
@@ -1310,7 +1365,10 @@ class ModularBridgeState {
         const gpus = gpuArrayValue(obj.GPUs)
         const cpu = cpuValue(obj.cpu)
         const memory = memoryValue(obj.memory)
-        const inferenceHardwareIds = optionalStringArrayValue(obj.inference_hardware_ids)
+        // A node-level list wins when a node sends one; otherwise the rows'
+        // own inference_ready flags decide (see inferenceReadyIds).
+        const inferenceHardwareIds =
+            optionalStringArrayValue(obj.inference_hardware_ids) ?? inferenceReadyIds(nodeId, gpus)
         if (node.nodeInfoUp && sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)) {
             emitBridgePush('metrics:update', toMetrics(node))
             return

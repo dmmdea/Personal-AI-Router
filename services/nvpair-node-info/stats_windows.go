@@ -79,6 +79,7 @@ import (
 
 const (
 	pdhCounterPathDedicated = `\GPU Adapter Memory(*)\Dedicated Usage`
+	pdhCounterPathShared    = `\GPU Adapter Memory(*)\Shared Usage`
 	pdhCounterPathEngine    = `\GPU Engine(*)\Utilization Percentage`
 	pdhCounterPathCPU       = `\Processor(_Total)\% Processor Time`
 
@@ -135,6 +136,7 @@ var (
 	// isn't present now, it isn't coming back without a reboot, and we
 	// don't want to log-spam on every retry attempt during startup.
 	pdhVRAMUnavailable   atomic.Bool
+	pdhSharedUnavailable atomic.Bool
 	pdhEngineUnavailable atomic.Bool
 	pdhCPUUnavailable    atomic.Bool
 )
@@ -198,9 +200,11 @@ func luidKey(low uint32, high int32) string {
 type statsCollector struct {
 	query         uintptr
 	vramCounter   uintptr
+	sharedCounter uintptr
 	engineCounter uintptr
 	cpuCounter    uintptr
 	hasVRAM       bool
+	hasShared     bool
 	hasEngine     bool
 	hasCPU        bool
 
@@ -418,6 +422,12 @@ func (c *statsCollector) open() error {
 		c.vramCounter = ctr
 		c.hasVRAM = true
 	}
+	// Shared Usage is read for every adapter but published only for an
+	// integrated one (GPUInfo.usedIncludesShared), whose pool it half-makes.
+	if ctr, ok := c.addCounter(pdhCounterPathShared, &pdhSharedUnavailable); ok {
+		c.sharedCounter = ctr
+		c.hasShared = true
+	}
 	if ctr, ok := c.addCounter(pdhCounterPathEngine, &pdhEngineUnavailable); ok {
 		c.engineCounter = ctr
 		c.hasEngine = true
@@ -427,7 +437,7 @@ func (c *statsCollector) open() error {
 		c.hasCPU = true
 	}
 
-	if !c.hasVRAM && !c.hasEngine && !c.hasCPU {
+	if !c.hasVRAM && !c.hasShared && !c.hasEngine && !c.hasCPU {
 		procPdhCloseQuery.Call(c.query)
 		c.query = 0
 		return fmt.Errorf("no performance counters available on this host")
@@ -577,6 +587,9 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 			out[lname] = s
 		}
 	}
+	if c.hasShared {
+		foldSharedUsage(out, readCounterLarge(c.sharedCounter))
+	}
 	utilizationSamples := 0
 	if c.hasEngine {
 		util := aggregateUtilization(readCounterDouble(c.engineCounter))
@@ -633,17 +646,30 @@ func (c *statsCollector) decodeCPU() uint32 {
 // differentiate "zero used" (an unrealistic but valid reading) from
 // "we don't know" in a future refactor.
 func readMemoryUsed() (uint64, bool) {
+	ms, ok := readMemoryStatus()
+	if !ok || ms.AvailPhys > ms.TotalPhys {
+		return 0, false
+	}
+	return ms.TotalPhys - ms.AvailPhys, true
+}
+
+// readMemoryStatus is the one GlobalMemoryStatusEx call both halves of the
+// memory readout come from: detectMemoryTotal publishes its TotalPhys and
+// readMemoryUsed subtracts AvailPhys from that same field, so the two are on
+// one base (see systemMemTotal in memory_detect.go). ok is false when the call
+// fails or reports no physical memory.
+func readMemoryStatus() (memoryStatusEx, bool) {
 	var ms memoryStatusEx
 	ms.Length = uint32(unsafe.Sizeof(ms))
 	r, _, err := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&ms)))
 	if r == 0 {
 		slog.Debug("GlobalMemoryStatusEx failed", "err", err)
-		return 0, false
+		return memoryStatusEx{}, false
 	}
-	if ms.TotalPhys == 0 || ms.AvailPhys > ms.TotalPhys {
-		return 0, false
+	if ms.TotalPhys == 0 {
+		return memoryStatusEx{}, false
 	}
-	return ms.TotalPhys - ms.AvailPhys, true
+	return ms, true
 }
 
 // readCounterLarge pulls the PDH_FMT_LARGE payload for each instance of

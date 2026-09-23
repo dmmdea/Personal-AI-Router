@@ -43,8 +43,10 @@ import (
 //     exposed through perf_event_open, which is root-gated by default
 //     (perf_event_paranoid), not in sysfs. There is no unprivileged sysfs
 //     attribute equivalent to amdgpu's gpu_busy_percent. So an Intel row
-//     carries NO utilization_percent at all rather than a fabricated 0 —
-//     "idle" and "we cannot tell" must never render the same.
+//     carries NO utilization_percent at all rather than a fabricated 0, and
+//     sets utilization_unavailable so a client can tell the absence from an
+//     idle reading (utilization_percent is omitempty, so a measured 0 is
+//     absent too) — "idle" and "we cannot tell" must never render the same.
 //   - No temperature on an integrated GPU. The only sensor near it is the CPU
 //     package sensor, which is the CPU's reading and is already published as
 //     cpu.temperature_celsius; repeating it as the GPU's would be a lie about
@@ -125,6 +127,10 @@ func detectIntelGPUs(drmRoot string) []GPUInfo {
 		row := GPUInfo{
 			Name:     intelModelName(c.deviceID),
 			statsKey: c.statsKey,
+			// No unprivileged busy counter exists (see the top of this
+			// file), so the row says so rather than leaving an absent
+			// utilization for a client to read as idle.
+			UtilizationUnavailable: true,
 		}
 		if c.discrete {
 			// Only if the driver actually publishes it: i915 does not expose
@@ -136,6 +142,9 @@ func detectIntelGPUs(drmRoot string) []GPUInfo {
 			// of it, so the row publishes the ceiling and no usage at all.
 			row.VramBytes = systemMemTotal()
 			row.MemoryPool = noderec.GPUMemoryPoolUnified
+			// And no engine PAIR runs on Linux drives an Intel iGPU, so a
+			// client must not present it as where the node's models run.
+			row.InferenceReady = notInferenceReady()
 		}
 		slog.Debug("Intel GPU detected",
 			"name", row.Name, "stats_key", row.statsKey, "driver", c.driver,

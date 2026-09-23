@@ -64,12 +64,15 @@ Returns the merged static identity (collected once at startup) and the latest dy
       "name": "Google Coral Edge TPU",
       "utilization_percent": 30,
       "kind": "npu",
-      "temperature_celsius": 52
+      "temperature_celsius": 52,
+      "inference_ready": false
     },
     {
       "name": "Intel UHD Graphics 630 (Coffee Lake, Gen 9.5)",
-      "vram_bytes": 70866960384,
-      "memory_pool": "unified"
+      "vram_bytes": 67282386944,
+      "memory_pool": "unified",
+      "utilization_unavailable": true,
+      "inference_ready": false
     }
   ],
   "telemetryValid": true,
@@ -99,10 +102,13 @@ Field notes:
 - `clusterUuid` exists so a peer can learn this node's membership without its mDNS record. Membership otherwise travels only as the `cluster-uuid=` TXT key, which a consumer reads once per record *change*; a consumer that misses that change keeps the previous value indefinitely, and one still holding a departed node's principal will suppress the invite that would bring it back.
 - `kind` is absent for a GPU, `"npu"` for a dedicated inference accelerator (an Edge TPU / NPU). Both are listed in the same `GPUs` inventory so every client shows them, and none of them can run the engines PAIR schedules — so consumers derive a node's GPU pressure with `noderec.MaxGPUUtilization`, which counts **only** rows with an empty `kind`, and no such row contributes to `telemetryValid` / `msSince`. The rule is "GPUs only" rather than a list of the kinds that existed when it was written, so a kind added later is skipped without anyone having to remember.
 - `temperature_celsius` is a device's thermal readout in whole degrees: on a GPU row from `nvidia-smi` (`temperature.gpu`, Linux and Windows; joined to the adapter by PCI address on Windows), on an accelerator row from its driver, and on `cpu` the package temperature from Linux hwmon (`coretemp` "Package id 0" / `k10temp` Tctl, else the `x86_pkg_temp` thermal zone). On Windows the package sensor is a ring-0 register, so the reading comes from the elevated `nvpair-sensors` service over `\\.\pipe\nvpair-sensors` (see `../nvpair-sensors/README.md`); a host without that service, without PawnIO, or with a stale report omits it. Every temperature field is omitted wherever it cannot be read.
-- `power_watts` is what a device is drawing in whole watts, published only where the hardware meters itself: an NVIDIA GPU (`nvidia-smi`'s `power.draw`, Linux and Windows), an AMD GPU or APU (the amdgpu hwmon's `PPT` input), and on `cpu` the package power derived from the processor's energy counter. Every other row has no meter and carries no such field — see **Power draw** below for the full table and for why a Linux host normally reports no `cpu.power_watts`.
+- `power_watts` is what a device is drawing in whole watts, published only where the hardware meters itself: an NVIDIA GPU (`nvidia-smi`'s `power.draw`, Linux and Windows), an AMD discrete GPU (the amdgpu hwmon's `PPT` input), and on `cpu` the package power — derived from the processor's energy counter, or on a Linux AMD APU host from that APU's `PPT` input, which meters the whole socket. Every other row has no meter and carries no such field — see **Power draw** below for the full table and for why a Linux host normally reports no `cpu.power_watts`.
 - All dynamic fields and the `cpu` / `memory` objects use `omitempty`: a value the service couldn't read is dropped from the JSON entirely rather than reported as a misleading literal zero. A genuinely idle CPU renders the same as "unknown" — that ambiguity is intentional and benign.
+- `utilization_unavailable` is `true` on a device row that has **no busy counter** this service can read, and absent everywhere else. It exists because `utilization_percent` is `omitempty`: a measured idle `0` is absent on the wire too, so the absence alone cannot tell "idle" from "cannot tell", and a client that renders both as "0 %" claims an idle device nobody measured. Set on a Hailo module (HailoRT has no busy counter on Windows), on every Linux Intel GPU (i915/xe keep theirs in a root-gated PMU), and on a Mali GPU or RKNPU row whose sampler has not read its counter — before the first read, or after three consecutive failed reads, rather than freezing the last value. A client must show such a row's usage as unknown; a row without the flag keeps its historical meaning, so an idle GPU on a node that predates the field still reads 0 %.
+- `inference_ready` is `false` on a device no engine PAIR runs can use — an Arm Mali GPU, an RKNPU, a Google Coral Edge TPU, a Hailo module, a Linux Intel integrated GPU — and absent on every other row, which makes no claim either way. It travels per row rather than as a node-level id list because clients re-sort the rows and build their own ids. The desktop derives the node's inference-ready list from it, so a board whose only devices are a Mali GPU and an NPU shows its CPU and RAM instead of two idle GPU rings.
+- `memory.total_bytes` and `memory.used_bytes` are on **one base**: the memory the operating system manages, read from the same source the used figure is — `/proc/meminfo` `MemTotal` on Linux (used = `MemTotal - MemAvailable`), `GlobalMemoryStatusEx` `TotalPhys` on Windows (used = `TotalPhys - AvailPhys`), gopsutil's Mach readers on macOS. The Linux Intel, Mali, RKNPU and NVIDIA UMA rows use this same total as their `vram_bytes` ceiling; a Windows integrated GPU does not (see `memory_pool` below), because this base excludes the firmware-reserved memory an APU's graphics carve-out lives in. Installed DIMM capacity is not used: on Windows it counts hardware-reserved memory that can never appear as used, and on Linux it is not readable unprivileged. The Linux total used to be the count of online memory blocks times the block size, which counts the blocks around the PCI hole and at the top of RAM in full: a 64 GiB desktop with 2 GiB blocks published 66 GiB against a `MemTotal` of 62.7 GiB, and RAM % read two points low.
 - `vram_bytes` is reported through DXGI on Windows, `nvidia-smi` on Linux, and IORegistry on macOS. On a unified-memory NVIDIA GPU such as DGX Spark, Linux uses total physical system memory for `vram_bytes` and the independently sampled system-memory usage for `vram_used_bytes`. On Apple Silicon, `vram_bytes` is total physical unified memory and `vram_used_bytes` is the GPU driver's mapped allocation (`Alloc system memory`), not whole-system RAM usage or the momentarily active subset.
-- `memory_pool` is absent on a device with memory of its own and `"unified"` on one whose `vram_bytes` is a pool it shares with the host. A client must not label a unified capacity "VRAM", and must not assume such a row reports usage — see **Unified memory rows** below.
+- `memory_pool` is absent on a device with memory of its own and `"unified"` on one whose `vram_bytes` is a pool it shares with the host. A client must not label a unified capacity "VRAM", and must not assume such a row reports usage — see **Unified memory rows** below. On Windows an Intel or AMD integrated adapter is classified by the same PCI id table the Linux inventory uses (`nvpair-shared/gpunames`), and an id the table does not list by DXCore's `IsIntegrated` adapter property; such a row's `vram_bytes` is DXGI's `DedicatedVideoMemory + SharedSystemMemory` and its `vram_used_bytes` is PDH's `Dedicated Usage + Shared Usage` — the Windows counterpart of amdgpu's VRAM + GTT on Linux. The dedicated half alone is only the firmware's stolen aperture (128 MB on a UHD 630) or an APU's carve-out, and the host memory total would lose that carve-out (it excludes firmware-reserved memory), so neither is used as the ceiling. Without a `Shared Usage` sample the row publishes no used figure rather than the dedicated half alone. A startup row the OS could not classify takes the integrated classification from a later re-detection; a later pass that cannot say does not undo it.
 
 ## Unified memory rows
 
@@ -116,9 +122,10 @@ Several devices in this inventory have no memory of their own: an Intel or AMD i
 | --- | --- | --- |
 | NVIDIA GPU, Linux | `nvidia-smi --query-gpu=power.draw`, on the same 1 s dynamic query as utilization and temperature | yes |
 | NVIDIA GPU, Windows | the same query on the 5 s `nvidia-smi` poller, joined to the DXGI adapter by PCI address — the same join the temperature uses | yes |
-| AMD GPU / APU, Linux | the amdgpu hwmon's `power1_input` (microwatts), the input labelled `PPT` | yes |
+| AMD discrete GPU, Linux | the amdgpu hwmon's `power1_input` (microwatts), the input labelled `PPT` | yes |
+| AMD APU, Linux | the same `PPT` input — the SMU's socket average, CPU cores included — published as **`cpu.power_watts`** when no RAPL package counter is readable (the ordinary case), and not on the APU's GPU row | on the CPU row |
 | CPU, Windows | `MSR_PKG_ENERGY_STATUS` (0x611) scaled by `MSR_RAPL_POWER_UNIT` (0x606), read by the elevated `nvpair-sensors` helper through PawnIO and delivered as `cpu.package_watts` over its named pipe | yes, when the helper is installed and running |
-| CPU, Linux | `/sys/class/powercap/intel-rapl:<N>/energy_uj` (the same class the `amd_rapl` driver registers under on Zen) | **no in practice** — see below |
+| CPU, Linux | `/sys/class/powercap/intel-rapl:<N>/energy_uj` (the same class the `amd_rapl` driver registers under on Zen) | **no in practice** — see below; an AMD APU host reports its package through the row above |
 | CPU, macOS | no driverless source | no |
 | Intel integrated GPU | i915/xe expose no power attribute to an unprivileged reader | no |
 | Arm Mali GPU, RKNPU | no meter in the driver | no |
@@ -129,6 +136,8 @@ Several devices in this inventory have no memory of their own: an Intel or AMD i
 **Every power figure is a derivative where the source is a counter.** `energy_uj` and `MSR_PKG_ENERGY_STATUS` are running totals that roll over, so watts are Δenergy / Δt between two ticks. The first tick after a start produces no figure at all, and a delta that can only be a counter re-base (a driver reload, a resume from sleep) is discarded and the baseline dropped, rather than published as the five-digit number the arithmetic would otherwise give. `nvidia-smi` and the amdgpu hwmon report instantaneous power directly and need none of that.
 
 **The Linux CPU ceiling.** Since Linux 5.10 `energy_uj` is mode `0400`, owned by root: the kernel restricted it because the counter is a side channel — power traces recovered AES keys and broke KASLR (CVE-2020-8694) — and no unprivileged interface replaced it. This service runs as the desktop user, so on an ordinary host the read fails with `EACCES`, one `INFO` line at startup names the file and the reason, and `cpu.power_watts` is omitted for the life of the process. Measured on both a Intel + NVIDIA host and an AMD Zen host: the zone is present and reads `package-0`, `max_energy_range_uj` is world-readable, and `energy_uj` is `-r--------`.
+
+The one exception is an AMD APU. Its amdgpu hwmon `PPT` input is world-readable and is the SMU's average socket power — the same quantity as the RAPL package domain (on a Barcelo APU the two agreed within a watt over the same windows) — so a host with an APU and no readable RAPL counter publishes that figure as `cpu.power_watts`. It used to appear as the APU's GPU `power_watts` instead, which left the CPU row blank and would have shown a CPU-bound load as GPU draw. The APU's GPU row now carries no watts, as an Intel integrated GPU row carries none: the SMU's `gpu_metrics` table splits the socket into rails, but on these parts the graphics rail is shared with the CPU cores and the per-core power unit is uncalibrated, so the GPU's own share would be a guess.
 
 This is a documented limit, not a gap to route around. Making it readable would take a setuid helper, a second elevated service, or a boot-time `chmod` of a file the kernel deliberately locked, and a single wattage figure does not justify any of them — the Windows reading exists because an elevated helper *already had to exist* for the package temperature, not because power was worth elevating for.
 
@@ -249,7 +258,8 @@ Only `card<N>` directories are enumerated, for the same reason as the AMD path �
 
 **Ceilings and caveats.**
 
-- **No `utilization_percent`, ever.** i915 keeps its engine-busy counters in a PMU reached through `perf_event_open`, which `perf_event_paranoid` gates behind root; there is no unprivileged sysfs attribute equivalent to amdgpu's `gpu_busy_percent`. The field is therefore absent rather than `0`, because "idle" and "we cannot tell" must not render the same. This is a driver limitation, not an unfinished feature.
+- **No `utilization_percent`, ever.** i915 keeps its engine-busy counters in a PMU reached through `perf_event_open`, which `perf_event_paranoid` gates behind root; there is no unprivileged sysfs attribute equivalent to amdgpu's `gpu_busy_percent`. The field is therefore absent rather than `0`, and the row carries `utilization_unavailable:true`, because "idle" and "we cannot tell" must not render the same (an idle `0` is absent too, so the absence alone cannot say which). This is a driver limitation, not an unfinished feature.
+- **Not inference-ready when integrated.** An integrated Intel GPU row carries `inference_ready:false`: no engine build PAIR runs on Linux was found with a backend that drives it. A discrete Arc card makes no such claim either way. The same part on **Windows** deliberately carries no `inference_ready` at all: whether the Windows engine builds drive it has not been established, and an absent flag makes no claim either way rather than asserting one.
 - **No temperature on an integrated GPU.** The only sensor near it is the CPU package sensor, which is already published as `cpu.temperature_celsius`; repeating it as the GPU's would be a reading from different silicon. A discrete Arc card has its own hwmon and that one is read, and because it is a temperature and not a utilization sample it never marks the node's GPU telemetry fresh.
 - An Intel row's presence therefore does not make `telemetryValid` true on an Intel-only host. Nothing about it is a live GPU sample.
 - Requires the `i915` or `xe` kernel driver. An adapter on neither keeps the `ghw` name-only behavior, and only when no other vendor detector found anything.
@@ -281,13 +291,13 @@ A Hailo M.2 module is not a display adapter, so DXGI never sees it. `nvpair-node
 
 **Ceilings on this platform. These are limits of HailoRT 4.24 on Windows, not gaps to work around:**
 
-- **No utilization.** HailoRT exposes no busy counter and its monitor mode is unsupported on Windows, so a Hailo row carries **no** `utilization_percent`. The field is omitted, never published as a literal `0`, which would read as "idle". (On Linux the gasket driver's `interrupt_counts` supports the figure for an Edge TPU; there is no equivalent here.)
+- **No utilization.** HailoRT exposes no busy counter and its monitor mode is unsupported on Windows, so a Hailo row carries **no** `utilization_percent`. The field is omitted, never published as a literal `0`, which would read as "idle", and the row carries `utilization_unavailable:true` so a client can tell that absence from an idle reading. (On Linux the gasket driver's `interrupt_counts` supports the figure for an Edge TPU; there is no equivalent here.)
 - **No power.** Power measurement is unsupported on the M.2 Hailo-8L module, so `hailo_power_measurement` is not called.
 - So the row is **presence + name + temperature**, and nothing else.
 
 **Without HailoRT installed**, a fitted module is still listed from the PnP enumerator (`HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1E60&DEV_*`), named from its PCI device id, with no temperature. That branch also retains an entry for a module that has since been removed, so the library scan — which talks to the hardware — is always preferred and the registry is read only when it is unavailable. A host with neither the library nor the device logs one Debug line and reports no accelerator, exactly as before.
 
-Like every accelerator row, a Hailo device never contributes to `telemetryValid` / `msSince` and is skipped by `noderec.MaxGPUUtilization`: it cannot run the engines PAIR schedules.
+Like every accelerator row, a Hailo device never contributes to `telemetryValid` / `msSince`, is skipped by `noderec.MaxGPUUtilization`, and carries `inference_ready:false`: it cannot run the engines PAIR schedules.
 
 A live check against real hardware ships with the tests and is skipped unless `NVPAIR_LIVE_HAILO=1` is set:
 
@@ -301,18 +311,18 @@ NVPAIR_LIVE_HAILO=1 hailo_windows.test.exe -test.run TestLiveHailoAccelerator -t
 
 ### Linux Rockchip (Mali via devfreq, RKNPU via debugfs)
 
-Rockchip RK35xx boards (measured on an RK3588S, vendor kernel 6.1) have no `nvidia-smi` and no PCI display adapter, so both Linux GPU detectors come back empty. Their two inference-capable devices are platform devices found in sysfs instead, and both are listed in the same `GPUs` inventory:
+Rockchip RK35xx boards (measured on an RK3588S, vendor kernel 6.1) have no `nvidia-smi` and no PCI display adapter, so both Linux GPU detectors come back empty. Their Mali GPU and NPU are platform devices found in sysfs instead, and both are listed in the same `GPUs` inventory. Neither can run PAIR's engines (no engine ships a Mali or RKNPU backend), so both rows carry `inference_ready:false`:
 
 | device | row | `statsKey` | utilization | temperature |
 | --- | --- | --- | --- | --- |
 | Arm Mali GPU | `"Arm Mali-G610 MP4"` (from `/sys/class/misc/mali0/device/gpuinfo`) | `mali:<devfreq node>` | devfreq `load`, `"<busy%>@<freq>Hz"`; the driver's `utilisation` attribute (0..100) when a kernel exposes no devfreq load | thermal zone `gpu-thermal` |
-| RKNPU | `"Rockchip RK3588 NPU (3 cores)"`, `kind:"npu"` (SoC from the device-tree `compatible`, core count from the driver) | `rknpu:<devfreq node>` | `/sys/kernel/debug/rknpu/load`, the mean across cores | thermal zone `npu-thermal` |
+| RKNPU | `"Rockchip RK3588S NPU (3 cores)"`, `kind:"npu"` (SoC from the board's root device-tree `compatible` — the same token the CPU row is named from — when it is a variant of the family the NPU node's own `compatible` names, since an RK3588S's NPU node says `rockchip,rk3588-rknpu`; core count from the driver) | `rknpu:<devfreq node>` | `/sys/kernel/debug/rknpu/load`, the mean across cores | thermal zone `npu-thermal` |
 
 Both are sampled in their own goroutine once a second and folded into the collector's snapshot, so a wedged driver node cannot delay the 1 s tick. Neither marks `telemetryValid`: PAIR's engines run on neither device, exactly as for a Coral Edge TPU.
 
 Memory is unified on these SoCs — there is no dedicated VRAM — so both rows report total system RAM as `vram_bytes` with `memory_pool:"unified"`, and neither reports `vram_used_bytes`: no Mali or RKNPU driver counter says how much of that pool the device holds, and the board's own memory usage is not an answer to that question (it read as an idle Mali-G610 using 1.1 GB of 8 GB). See [Unified memory rows](#unified-memory-rows).
 
-**The NPU's utilization requires readable debugfs.** The RKNPU devfreq node also publishes a `load`, but it reads a constant `100@…Hz` while the NPU is idle, so it is never used; the driver's real per-core counter is only in debugfs, which the kernel mounts `0700` (root only). Without it the NPU row stays in the inventory with its temperature, `utilization_percent` is omitted, and the service logs one line naming the file and the fix. To make it readable by the unprivileged service, remount debugfs world-readable at boot (e.g. a small systemd unit ordered before the service):
+**The NPU's utilization requires readable debugfs.** The RKNPU devfreq node also publishes a `load`, but it reads a constant `100@…Hz` while the NPU is idle, so it is never used; the driver's real per-core counter is only in debugfs, which the kernel mounts `0700` (root only). Without it the NPU row stays in the inventory with its temperature, `utilization_percent` is omitted and `utilization_unavailable:true` says why, and the service logs one line naming the file and the fix. The same flag marks either row before its first successful read, and after three consecutive failed reads, instead of holding a value nothing is refreshing. To make it readable by the unprivileged service, remount debugfs world-readable at boot (e.g. a small systemd unit ordered before the service):
 
 ```sh
 mount -o remount,mode=755 /sys/kernel/debug
@@ -322,13 +332,13 @@ The service never attempts the remount itself, and it reads nothing else from de
 
 CPU identity on these boards is repaired from the device tree, because `/proc/cpuinfo` gives `ghw` neither a model name nor the full core count: the kernel groups the asymmetric clusters into separate packages, so `ghw` reports one cluster (4) rather than the SoC's 8 cores. `/proc/device-tree/model` and the first `compatible` entry supply the board and the SoC, and the `processor` entries of `/proc/cpuinfo` raise the core count — both only on a host that has a device tree, so an x86 host keeps `ghw`'s physical-core count untouched. The CPU package temperature falls back to the `cpu-thermal`, `soc-thermal` and `cpu_thermal` thermal zones (in that order, after `x86_pkg_temp`) because no hwmon entry on these boards names a CPU driver; the SoC-wide zone is preferred over arbitrarily picking one cluster's.
 
-A live response from an idle board:
+The shape of a response from an idle board with readable debugfs (an idle 0 % utilization is omitted, as on every row):
 
 ```json
 {
   "GPUs": [
-    {"name": "Arm Mali-G610 MP4", "vram_bytes": 8587837440, "vram_used_bytes": 907354112, "temperature_celsius": 40},
-    {"name": "Rockchip RK3588 NPU (3 cores)", "vram_bytes": 8587837440, "vram_used_bytes": 907354112, "kind": "npu", "temperature_celsius": 41}
+    {"name": "Arm Mali-G610 MP4", "vram_bytes": 8587837440, "temperature_celsius": 40, "memory_pool": "unified", "inference_ready": false},
+    {"name": "Rockchip RK3588S NPU (3 cores)", "vram_bytes": 8587837440, "kind": "npu", "temperature_celsius": 41, "memory_pool": "unified", "inference_ready": false}
   ],
   "cpu": {"name": "Rockchip RK3588S (Orange Pi 5)", "cores": 8, "utilization_percent": 9, "temperature_celsius": 42},
   "memory": {"total_bytes": 8587837440, "used_bytes": 907354112},

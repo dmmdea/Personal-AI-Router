@@ -15,6 +15,11 @@ export interface GpuInfo {
     // "Shared" instead of "VRAM", because the same bytes are the CPU's - and
     // pairs it with a used figure only when the node reported one.
     memoryPool?: string
+    // True when the node says this device has no busy counter it can read (a
+    // Hailo module, a Linux Intel GPU, an unreadable Rockchip counter). Such a
+    // row has no utilization series, and the UI shows its usage as unknown
+    // ("—") rather than as an idle 0 %; absent on every row with a source.
+    utilizationUnavailable?: boolean
 }
 
 export interface StorageInfo {

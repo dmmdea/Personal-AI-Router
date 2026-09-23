@@ -64,30 +64,34 @@ const (
 	// rockchipSampleInterval matches the collector's 1 s tick. Both sources are
 	// instantaneous readings, so sampling faster would only add jitter.
 	rockchipSampleInterval = time.Second
+
+	// rockchipUtilHoldTicks is how many consecutive failed utilization reads
+	// keep the last good value. A single failed sysfs read should not blank
+	// the figure, but a counter that has become unreadable (debugfs remounted
+	// 0700, a driver unbound) must stop being published: holding its last
+	// value forever would show a frozen reading as a live one.
+	rockchipUtilHoldTicks = 3
 )
 
 // rockchipRoots are the class directories the Rockchip detectors read. Held as
 // a struct so tests can point every lookup at a fake tree.
 type rockchipRoots struct {
-	misc    string // /sys/class/misc
-	devfreq string // /sys/class/devfreq
-	thermal string // /sys/class/thermal
-	debugfs string // /sys/kernel/debug
+	misc       string // /sys/class/misc
+	devfreq    string // /sys/class/devfreq
+	thermal    string // /sys/class/thermal
+	debugfs    string // /sys/kernel/debug
+	deviceTree string // /proc/device-tree; "" reads no board identity
 }
 
 func systemRockchipRoots() rockchipRoots {
 	return rockchipRoots{
-		misc:    miscClassDir,
-		devfreq: devfreqClassDir,
-		thermal: thermalClassDir,
-		debugfs: debugfsDir,
+		misc:       miscClassDir,
+		devfreq:    devfreqClassDir,
+		thermal:    thermalClassDir,
+		debugfs:    debugfsDir,
+		deviceTree: procDeviceTreeDir,
 	}
 }
-
-// systemMemTotal caches the system-memory total shared by every unified-memory
-// row on this host. Both detectors need it and neither should pay for a second
-// ghw introspection.
-var systemMemTotal = sync.OnceValue(detectMemoryTotal)
 
 // maliDevice is the Mali GPU as found in sysfs: a display name, the devfreq
 // node name that becomes its statsKey, and the files its sampler reads.
@@ -142,12 +146,18 @@ func detectRockchipGPUs() []GPUInfo {
 // dedicated VRAM. VramUsedBytes is deliberately left for the response to omit:
 // unlike the nvidia UMA parts, nothing on this SoC measures the GPU's share of
 // that pool, and substituting the host's would be an invented number.
+//
+// The row is not inference-ready: no engine PAIR runs has a Mali backend, so a
+// client must not present this GPU as where the node's models run. Its
+// utilization is published only while the sampler is reading it.
 func maliRow(dev maliDevice, memTotal uint64) GPUInfo {
 	return GPUInfo{
-		Name:       dev.name,
-		VramBytes:  memTotal,
-		statsKey:   dev.statsKey(),
-		MemoryPool: noderec.GPUMemoryPoolUnified,
+		Name:                   dev.name,
+		VramBytes:              memTotal,
+		statsKey:               dev.statsKey(),
+		MemoryPool:             noderec.GPUMemoryPoolUnified,
+		InferenceReady:         notInferenceReady(),
+		utilizationNeedsSample: true,
 	}
 }
 
@@ -282,17 +292,21 @@ func firstExistingFile(paths ...string) string {
 
 // rockchipSampler polls one Rockchip device (Mali GPU or RKNPU) in its own
 // goroutine and publishes the latest gpuStat atomically; the collector's tick
-// only reads the published pointer. readUtil is the device-specific source; a
-// failed read keeps the previous value rather than reporting a spurious 0, so a
-// transient sysfs error cannot masquerade as an idle device.
+// only reads the published pointer. readUtil is the device-specific source. A
+// failed read keeps the previous value for up to rockchipUtilHoldTicks ticks,
+// so a transient sysfs error cannot masquerade as an idle device; past that,
+// and before the first successful read, the stat says UtilizationKnown=false
+// and the row is published as having no utilization source.
 type rockchipSampler struct {
 	key      string
 	readUtil func() (uint32, bool)
 	tempPath string
 
 	// Sampler-goroutine state; never touched by other goroutines.
-	util uint32
-	temp uint32
+	util      uint32
+	utilKnown bool
+	utilFails int
+	temp      uint32
 
 	latest atomic.Pointer[gpuStat]
 	stop   chan struct{}
@@ -312,14 +326,16 @@ func newRockchipSampler(key string, readUtil func() (uint32, bool), tempPath str
 // sample takes one reading from both sources and publishes it.
 func (s *rockchipSampler) sample() {
 	if util, ok := s.readUtil(); ok {
-		s.util = util
+		s.util, s.utilKnown, s.utilFails = util, true, 0
+	} else if s.utilFails++; s.utilFails >= rockchipUtilHoldTicks {
+		s.util, s.utilKnown = 0, false
 	}
 	if s.tempPath != "" {
 		if temp, ok := parseMillidegrees(readSysfs(s.tempPath)); ok {
 			s.temp = temp
 		}
 	}
-	st := gpuStat{UtilizationPct: s.util, TemperatureC: s.temp}
+	st := gpuStat{UtilizationPct: s.util, UtilizationKnown: s.utilKnown, TemperatureC: s.temp}
 	s.latest.Store(&st)
 }
 

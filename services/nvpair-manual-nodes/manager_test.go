@@ -739,3 +739,47 @@ func TestNodeInfoRelayCarriesPowerWatts(t *testing.T) {
 		t.Fatal("cpuEqual ignored a changed wattage")
 	}
 }
+
+// TestNodeInfoRelayCarriesUsageAndReadinessMarkers pins the same re-marshal for
+// utilization_unavailable and inference_ready: dropped here, a manually added
+// node's Hailo row would read "0 %" again and its accelerators would be
+// presented as inference devices. A change in either is a change the broker
+// must hear about.
+func TestNodeInfoRelayCarriesUsageAndReadinessMarkers(t *testing.T) {
+	const body = `{"GPUs":[{"name":"NVIDIA GeForce RTX 5060","vram_bytes":8279556096},` +
+		`{"name":"Hailo-8L AI Accelerator","utilization_unavailable":true,"inference_ready":false}],` +
+		`"telemetryValid":true,"msSince":12}`
+	var decoded NodeInfoResponse
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out, err := json.Marshal(decoded.GPUs)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !strings.Contains(string(out), `"utilization_unavailable":true`) ||
+		!strings.Contains(string(out), `"inference_ready":false`) {
+		t.Fatalf("the re-marshal dropped a marker: %s", out)
+	}
+	if strings.Count(string(out), "inference_ready") != 1 {
+		t.Fatalf("a row with no readiness claim grew one: %s", out)
+	}
+
+	ready := true
+	changed := []GPUInfo{decoded.GPUs[0], decoded.GPUs[1]}
+	changed[1].InferenceReady = &ready
+	if gpusEqual(decoded.GPUs, changed) {
+		t.Fatal("gpusEqual ignored a changed inference_ready")
+	}
+	measured := []GPUInfo{decoded.GPUs[0], decoded.GPUs[1]}
+	measured[1].UtilizationUnavailable = false
+	if gpusEqual(decoded.GPUs, measured) {
+		t.Fatal("gpusEqual ignored a changed utilization_unavailable")
+	}
+	notReady := false
+	same := []GPUInfo{decoded.GPUs[0], decoded.GPUs[1]}
+	same[1].InferenceReady = &notReady
+	if !gpusEqual(decoded.GPUs, same) {
+		t.Fatal("gpusEqual compared the readiness pointers instead of their values")
+	}
+}

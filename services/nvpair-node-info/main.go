@@ -57,6 +57,25 @@ type GPUInfo struct {
 	// publishing it as the device's would claim an iGPU is holding tens of
 	// gigabytes it never allocated.
 	MemoryPool string `json:"memory_pool,omitempty"`
+	// UtilizationUnavailable is true on a row whose device has no busy counter
+	// this service can read, so its absent utilization_percent means "cannot
+	// tell" rather than "idle". utilization_percent is omitempty, so a measured
+	// 0 is absent on the wire as well: without this marker a client cannot tell
+	// the two apart, and rendering both as "0 %" claims an idle device nobody
+	// measured. Set by the detectors that know they have no source (a Hailo
+	// module, a Linux Intel GPU) and by buildResponseAt for a Rockchip row whose
+	// sampler has not read its counter. Absent — the historical shape — keeps
+	// every older reading of the field, so an idle GPU on a node that predates
+	// the marker still reads 0 %.
+	UtilizationUnavailable bool `json:"utilization_unavailable,omitempty"`
+	// InferenceReady is false on a row no engine PAIR runs can use — a Mali
+	// GPU, an RKNPU, an Edge TPU, a Hailo module, a Linux Intel iGPU — and
+	// absent everywhere else. It is a pointer so that "not ready" is explicit
+	// on the wire and absent keeps its historical meaning: a client that sees no
+	// flag treats the row as it always has. It travels per row rather than as a
+	// node-level id list because a client re-sorts the rows and builds its own
+	// ids, which this service cannot predict.
+	InferenceReady *bool `json:"inference_ready,omitempty"`
 
 	// statsKey is the opaque per-adapter identifier used to join this
 	// static GPUInfo against statsCollector.Snapshot() results. Its
@@ -93,6 +112,32 @@ type GPUInfo struct {
 	// onto it reported a Coffee Lake iGPU as using 25.5 GB while it held a
 	// framebuffer, which is why those rows no longer set this flag.
 	usesSystemMemoryUsage bool `json:"-"`
+
+	// usedIncludesShared marks a unified row whose pool is its dedicated
+	// memory plus the shared system memory it may map, so its used figure is
+	// the two usage counters summed. A Windows integrated GPU is the case:
+	// VramBytes is DXGI's DedicatedVideoMemory + SharedSystemMemory (the
+	// stolen aperture or an APU's firmware carve-out, plus the shared limit)
+	// and the used figure is PDH's Dedicated Usage + Shared Usage — the
+	// Windows counterpart of amdgpu's vram + gtt on Linux. With no Shared
+	// Usage sample the row publishes no used figure rather than the dedicated
+	// half alone.
+	usedIncludesShared bool `json:"-"`
+
+	// utilizationNeedsSample marks a row whose utilization comes from a sampler
+	// that says whether it read one (gpuStat.UtilizationKnown): the Rockchip
+	// Mali and RKNPU rows, whose counters can be unreadable to this service.
+	// Until a read succeeds — and after the sampler gives up holding the last
+	// one — buildResponseAt publishes the row as UtilizationUnavailable rather
+	// than letting its absent utilization read as idle.
+	utilizationNeedsSample bool `json:"-"`
+}
+
+// notInferenceReady is the InferenceReady value of a row no engine can use.
+// A function rather than a shared pointer so no row can mutate another's.
+func notInferenceReady() *bool {
+	ready := false
+	return &ready
 }
 
 // CPUInfo is the node-level CPU readout. Name and Cores are filled once
@@ -118,10 +163,10 @@ type CPUInfo struct {
 	PowerWatts float64 `json:"power_watts,omitempty"`
 }
 
-// MemoryInfo is the node-level physical-RAM readout. TotalBytes is reported by
-// ghw at startup except on macOS, where gopsutil supplies both total and used
-// memory through Mach. Windows used memory comes from GlobalMemoryStatusEx and
-// Linux used memory comes from /proc/meminfo.
+// MemoryInfo is the node-level physical-RAM readout. TotalBytes is read once
+// at startup and UsedBytes every tick, both from one source per platform so
+// they share a base (systemMemTotal in memory_detect.go): /proc/meminfo on
+// Linux, GlobalMemoryStatusEx on Windows, gopsutil's Mach readers on macOS.
 type MemoryInfo struct {
 	TotalBytes uint64 `json:"total_bytes,omitempty"`
 	UsedBytes  uint64 `json:"used_bytes,omitempty"`
@@ -240,8 +285,18 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 		if gpu.usesSystemMemoryUsage {
 			gpu.VramUsedBytes = snap.MemUsedBytes
 		}
-		if s, ok := snap.GPU[gpu.statsKey]; ok {
-			if !gpu.usesSystemMemoryUsage {
+		s, ok := snap.GPU[gpu.statsKey]
+		if gpu.utilizationNeedsSample && (!ok || !s.UtilizationKnown) {
+			gpu.UtilizationUnavailable = true
+		}
+		if ok {
+			switch {
+			case gpu.usesSystemMemoryUsage:
+			case gpu.usedIncludesShared:
+				if s.SharedUsedKnown {
+					gpu.VramUsedBytes = s.VRAMUsed + s.SharedUsed
+				}
+			default:
 				gpu.VramUsedBytes = s.VRAMUsed
 			}
 			gpu.UtilizationPercent = s.UtilizationPct
@@ -347,6 +402,11 @@ func mergeGPUInventory(static, recovered []GPUInfo, hardwareKeys map[string]stri
 				// port) must not keep the old card's name and memory.
 				merged[index].Name = cmp.Or(gpu.Name, merged[index].Name)
 				merged[index].VramBytes = cmp.Or(gpu.VramBytes, merged[index].VramBytes)
+				// Its capacity's meaning travels with the capacity: a unified
+				// pool ceiling must not be published as a discrete card's VRAM,
+				// nor the reverse.
+				merged[index].MemoryPool = gpu.MemoryPool
+				merged[index].usedIncludesShared = gpu.usedIncludesShared
 				byStatsKey[gpu.statsKey] = index
 			}
 		}
@@ -356,6 +416,16 @@ func mergeGPUInventory(static, recovered []GPUInfo, hardwareKeys map[string]stri
 			}
 			if merged[index].VramBytes == 0 {
 				merged[index].VramBytes = gpu.VramBytes
+			}
+			// A re-detection that classifies the adapter as a shared pool
+			// wins over a startup row that did not (the OS could not answer
+			// at boot), and brings the pool's ceiling with it. The reverse is
+			// not taken: "could not say" on a later pass is no evidence that
+			// the adapter stopped being integrated.
+			if gpu.MemoryPool != "" && merged[index].MemoryPool == "" {
+				merged[index].MemoryPool = gpu.MemoryPool
+				merged[index].usedIncludesShared = gpu.usedIncludesShared
+				merged[index].VramBytes = cmp.Or(gpu.VramBytes, merged[index].VramBytes)
 			}
 			continue
 		}
@@ -497,7 +567,7 @@ func main() {
 		log.Print("CPU detection returned no info")
 	}
 
-	memTotal := detectMemoryTotal()
+	memTotal := systemMemTotal()
 	if memTotal > 0 {
 		log.Printf("detected memory: %d MiB total", memTotal/(1024*1024))
 	} else {

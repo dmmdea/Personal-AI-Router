@@ -83,6 +83,10 @@ type rknpuDevice struct {
 	loadPath   string // <debugfs>/rknpu/load
 	tempPath   string // npu-thermal zone temp; "" when absent
 
+	// rootSoC is the SoC part the board's root compatible names ("RK3588S"),
+	// the same token the CPU row is named from; "" when there is none.
+	rootSoC string
+
 	warnOnce sync.Once
 }
 
@@ -111,13 +115,19 @@ func detectRockchipNPU() []GPUInfo {
 // driver reports no allocation of its own, and the host's RAM usage is not the
 // NPU's — that substitution is what had an 8 GB board claiming the NPU held
 // 1.1 GB of memory it had never asked for.
+//
+// It is not inference-ready (no engine PAIR runs has an RKNPU backend), and its
+// utilization is published only while the debugfs counter is being read: an
+// unprivileged service usually cannot read it at all.
 func rknpuRow(dev *rknpuDevice, cores int, memTotal uint64) GPUInfo {
 	return GPUInfo{
-		Name:       rknpuProductName(dev.compatible, cores),
-		Kind:       noderec.GPUKindAccelerator,
-		VramBytes:  memTotal,
-		statsKey:   rknpuStatsPrefix + dev.node,
-		MemoryPool: noderec.GPUMemoryPoolUnified,
+		Name:                   rknpuProductName(dev.compatible, dev.rootSoC, cores),
+		Kind:                   noderec.GPUKindAccelerator,
+		VramBytes:              memTotal,
+		statsKey:               rknpuStatsPrefix + dev.node,
+		MemoryPool:             noderec.GPUMemoryPoolUnified,
+		InferenceReady:         notInferenceReady(),
+		utilizationNeedsSample: true,
 	}
 }
 
@@ -140,6 +150,7 @@ func findRKNPUDevice(r rockchipRoots) (*rknpuDevice, bool) {
 		return &rknpuDevice{
 			node:       name,
 			compatible: ueventValue(uevent, "OF_COMPATIBLE_0"),
+			rootSoC:    deviceTreeSoCPart(r.deviceTree),
 			loadPath:   filepath.Join(r.debugfs, rknpuDebugfsName, "load"),
 			tempPath:   findThermalZone(r.thermal, rknpuThermalZone),
 		}, true
@@ -157,13 +168,25 @@ func (d *rknpuDevice) cores() int {
 	return rknpuSoCCores[d.compatible]
 }
 
-// rknpuProductName builds "Rockchip RK3588 NPU (3 cores)" from the device-tree
-// compatible string and the core count, degrading to a generic name when the
-// compatible string is missing or unparseable.
-func rknpuProductName(compatible string, cores int) string {
+// rknpuProductName builds "Rockchip RK3588S NPU (3 cores)" from the NPU's
+// device-tree compatible string, the board's root SoC part and the core count,
+// degrading to a generic name when the compatible string is missing or
+// unparseable.
+//
+// The NPU block's compatible names the SoC family, not the chip: an RK3588S
+// board's NPU node says "rockchip,rk3588-rknpu", because the block is the same
+// IP on both parts. The board's root compatible names the actual chip, which is
+// what the CPU row on the same card shows, so the root part is used when it is
+// a variant of the family the NPU names (RK3588S starts with RK3588). Any other
+// root part — an unrecognised board token, a different SoC — keeps the NPU's
+// own family name rather than attaching the NPU to the wrong chip.
+func rknpuProductName(compatible, rootSoC string, cores int) string {
 	_, soc := splitCompatible(compatible)
 	if soc == "" {
 		return rknpuFallbackName
+	}
+	if rootSoC != "" && strings.HasPrefix(rootSoC, soc) {
+		soc = rootSoC
 	}
 	name := "Rockchip " + soc + " NPU"
 	switch {
@@ -173,6 +196,21 @@ func rknpuProductName(compatible string, cores int) string {
 		name += " (" + strconv.Itoa(cores) + " cores)"
 	}
 	return name
+}
+
+// deviceTreeSoCPart is the upper-cased SoC part token the board's root
+// compatible names ("RK3588S" on an Orange Pi 5), taken from the same
+// deviceTreeIdentity the CPU row is named from. "" without a device tree.
+func deviceTreeSoCPart(root string) string {
+	if root == "" {
+		return ""
+	}
+	_, soc := deviceTreeIdentity(root)
+	fields := strings.Fields(soc)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
 }
 
 // readUtilization is the sampler's source: the mean across NPU cores, or false

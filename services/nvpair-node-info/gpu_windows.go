@@ -415,13 +415,23 @@ func enumerateAdapterCandidates() []adapterCandidate {
 			hardwareKey = "pci:" + pciAddress
 		}
 
+		gpu := GPUInfo{
+			Name:        name,
+			VramBytes:   uint64(desc.DedicatedVideoMemory),
+			statsKey:    luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh),
+			hardwareKey: hardwareKey,
+		}
+		// An integrated GPU's DedicatedVideoMemory is its stolen aperture,
+		// not its pool (gpu_integrated_windows.go).
+		luidLow, luidHigh := desc.AdapterLuidLow, desc.AdapterLuidHigh
+		if adapterIntegrated(desc.VendorID, desc.DeviceID, func() (bool, bool) {
+			return dxcoreIsIntegrated(luidLow, luidHigh)
+		}) {
+			markIntegrated(&gpu, uint64(desc.DedicatedVideoMemory), uint64(desc.SharedSystemMemory))
+		}
+
 		candidates = append(candidates, adapterCandidate{
-			gpu: GPUInfo{
-				Name:        name,
-				VramBytes:   uint64(desc.DedicatedVideoMemory),
-				statsKey:    luidKey(desc.AdapterLuidLow, desc.AdapterLuidHigh),
-				hardwareKey: hardwareKey,
-			},
+			gpu:             gpu,
 			pciAddress:      pciAddress,
 			luid:            luidUint64(desc.AdapterLuidLow, desc.AdapterLuidHigh),
 			luidLow:         desc.AdapterLuidLow,

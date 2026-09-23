@@ -59,6 +59,12 @@ type GPUInfo struct {
 	// re-marshal, so a metered device on a manually-added node would reach
 	// the UI with no wattage at all if the field stopped here.
 	PowerWatts float64 `json:"power_watts,omitempty"`
+	// UtilizationUnavailable and InferenceReady are carried through for the
+	// same reason (noderec.GPUInfo documents both): dropped here, a manually
+	// added node's Hailo row would read "0 %" again and its Mali GPU would be
+	// presented as an inference device.
+	UtilizationUnavailable bool  `json:"utilization_unavailable,omitempty"`
+	InferenceReady         *bool `json:"inference_ready,omitempty"`
 }
 
 // CPUInfo and MemoryInfo mirror the top-level objects nvpair-node-info
@@ -738,11 +744,22 @@ func gpusEqual(a, b []GPUInfo) bool {
 			a[i].VramUsedBytes != b[i].VramUsedBytes ||
 			a[i].UtilizationPercent != b[i].UtilizationPercent ||
 			a[i].MemoryPool != b[i].MemoryPool ||
-			a[i].PowerWatts != b[i].PowerWatts {
+			a[i].PowerWatts != b[i].PowerWatts ||
+			a[i].UtilizationUnavailable != b[i].UtilizationUnavailable ||
+			!sameReadiness(a[i].InferenceReady, b[i].InferenceReady) {
 			return false
 		}
 	}
 	return true
+}
+
+// sameReadiness compares two optional readiness flags by value: absent equals
+// only absent, and two present flags are equal when they say the same thing.
+func sameReadiness(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // cpuEqual and memoryEqual are nil-aware equality helpers for the new
