@@ -43,13 +43,16 @@ import (
 //   - temperature : hailo_get_chip_temperature returns the two on-die sensors
 //     (TS0/TS1) and the number of samples behind them. The reported figure is
 //     the hotter of the two, rounded.
+//   - utilization : HailoRT 4.24 on Windows has no busy counter in the API and
+//     its monitor mode is unsupported on this platform, so the figure comes
+//     from the process that runs inference on the device instead: it
+//     publishes a duty-cycle file (accel_activity.go) that the sampler reads
+//     on the same tick. Without a usable, current file the row carries
+//     utilization_unavailable rather than a literal 0, which would read as
+//     "idle" and would be a lie.
 //
-// What this deliberately does NOT report, because HailoRT 4.24 on Windows
-// cannot supply it:
+// What this deliberately does NOT report:
 //
-//   - utilization: there is no busy counter in the API and the runtime's
-//     monitor mode is unsupported on this platform, so no utilization_percent
-//     is published. A literal 0 would read as "idle" and would be a lie.
 //   - power: power measurement is unsupported on the M.2 Hailo-8L module, so
 //     hailo_power_measurement is not called at all.
 //
@@ -647,17 +650,20 @@ func (l *hailoLib) acceleratorRows(ids []string, list subKeyLister) []GPUInfo {
 	return out
 }
 
-// hailoRow is one Hailo module's inventory row, whichever path found it. The
-// row says outright that it has no utilization source (HailoRT exposes no busy
-// counter on Windows, see the top of this file) and that no engine can use it,
-// so a client renders neither an invented "0 %" nor an inference device.
+// hailoRow is one Hailo module's inventory row, whichever path found it. Its
+// utilization comes only from the activity file its sampler reads (HailoRT
+// exposes no busy counter on Windows, see the top of this file), so the row
+// needs a sample that says it read one: without it — no sampler, as on the
+// PnP presence path, or no usable current file — buildResponseAt publishes
+// the row as utilization_unavailable. It also says no engine can use it, so a
+// client renders neither an invented "0 %" nor an inference device.
 func hailoRow(name, statsKey string) GPUInfo {
 	return GPUInfo{
 		Name:                   name,
 		Kind:                   noderec.GPUKindAccelerator,
-		UtilizationUnavailable: true,
 		InferenceReady:         notInferenceReady(),
 		statsKey:               statsKey,
+		utilizationNeedsSample: true,
 	}
 }
 
@@ -705,8 +711,9 @@ type hailoTempReader func() (ts0, ts1 float32, samples uint16, err error)
 type hailoOpener func() (hailoTempReader, func(), error)
 
 // hailoSampler polls one device in its own goroutine and publishes the latest
-// gpuStat atomically; the collector's 1 s tick only reads it. Utilization is
-// never published — HailoRT exposes no busy counter on Windows.
+// gpuStat atomically; the collector's 1 s tick only reads it. Temperature
+// comes from the device; utilization from the activity file, when the sampler
+// has a source for it (activity), and only with UtilizationKnown set.
 type hailoSampler struct {
 	key string
 	id  string
@@ -717,6 +724,11 @@ type hailoSampler struct {
 	release  func()
 	failures int
 	lastNote string
+	// tempC is the last good temperature, 0 before the first one. A failed
+	// read keeps it, as the published sample always has.
+	tempC uint32
+	// activity is nil when there is no utilization source for this device.
+	activity *hailoActivity
 
 	latest atomic.Pointer[gpuStat]
 	stop   chan struct{}
@@ -746,6 +758,13 @@ func startHailoSamplers() []*hailoSampler {
 		slog.Warn("hailo_scan_devices failed; no accelerator temperature will be reported", "err", err)
 		return nil
 	}
+	// The activity file names a device type, not a module: with more than
+	// one module fitted it cannot be attributed to either, so utilization
+	// stays unavailable on all of them rather than being shown on a guess.
+	if len(ids) > 1 {
+		slog.Info("more than one Hailo module; the activity file cannot be attributed, utilization unavailable",
+			"devices", len(ids))
+	}
 	var samplers []*hailoSampler
 	for _, id := range ids {
 		device := id
@@ -756,15 +775,37 @@ func startHailoSamplers() []*hailoSampler {
 			}
 			return dev.temperature, dev.close, nil
 		})
+		if len(ids) == 1 {
+			s.activity = newHailoActivity(os.Getenv)
+		}
 		go s.run()
 		samplers = append(samplers, s)
 	}
 	return samplers
 }
 
-// sample performs one poll: open the device if it is not open, read both
-// sensors, publish. Split out from run so the reopen rule is unit-testable.
+// sample performs one poll: read the temperature, read the activity file,
+// publish. Split out from run so the reopen rule is unit-testable.
+//
+// Nothing is published until one of the two produced something, so a device
+// that never answers and has no writer stays absent from the snapshot. Once a
+// sample exists, every tick replaces it, so a utilization that stops being
+// known is withdrawn rather than frozen.
 func (s *hailoSampler) sample() {
+	s.sampleTemperature()
+	st := gpuStat{TemperatureC: s.tempC}
+	if s.activity != nil {
+		st.UtilizationPct, st.UtilizationKnown = s.activity.sample(s.id)
+	}
+	if st.TemperatureC == 0 && !st.UtilizationKnown && s.latest.Load() == nil {
+		return
+	}
+	s.latest.Store(&st)
+}
+
+// sampleTemperature opens the device if it is not open and reads both
+// sensors into tempC.
+func (s *hailoSampler) sampleTemperature() {
 	if s.read == nil {
 		read, release, err := s.open()
 		if err != nil {
@@ -794,8 +835,7 @@ func (s *hailoSampler) sample() {
 	if !ok {
 		return
 	}
-	st := gpuStat{TemperatureC: c}
-	s.latest.Store(&st)
+	s.tempC = c
 	s.lastNote = ""
 }
 

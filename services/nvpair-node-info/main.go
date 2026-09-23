@@ -62,9 +62,10 @@ type GPUInfo struct {
 	// tell" rather than "idle". utilization_percent is omitempty, so a measured
 	// 0 is absent on the wire as well: without this marker a client cannot tell
 	// the two apart, and rendering both as "0 %" claims an idle device nobody
-	// measured. Set by the detectors that know they have no source (a Hailo
-	// module, a Linux Intel GPU) and by buildResponseAt for a Rockchip row whose
-	// sampler has not read its counter. Absent — the historical shape — keeps
+	// measured. Set by the detectors that know they have no source (a Linux
+	// Intel GPU) and by buildResponseAt for a row whose sampler has not read its
+	// counter (a Rockchip row, or a Hailo row without a usable activity file).
+	// Absent — the historical shape — keeps
 	// every older reading of the field, so an idle GPU on a node that predates
 	// the marker still reads 0 %.
 	UtilizationUnavailable bool `json:"utilization_unavailable,omitempty"`
@@ -126,7 +127,9 @@ type GPUInfo struct {
 
 	// utilizationNeedsSample marks a row whose utilization comes from a sampler
 	// that says whether it read one (gpuStat.UtilizationKnown): the Rockchip
-	// Mali and RKNPU rows, whose counters can be unreadable to this service.
+	// Mali and RKNPU rows, whose counters can be unreadable to this service,
+	// and a Windows Hailo row, whose figure exists only while the inference
+	// process publishes its activity file.
 	// Until a read succeeds — and after the sampler gives up holding the last
 	// one — buildResponseAt publishes the row as UtilizationUnavailable rather
 	// than letting its absent utilization read as idle.
