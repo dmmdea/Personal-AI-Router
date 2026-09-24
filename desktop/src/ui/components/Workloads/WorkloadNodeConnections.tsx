@@ -8,6 +8,7 @@ import { workloadExecutionNodeId, workloadKey } from '@/shared/utils/workloads'
 import { getWorkloadStateColor } from '@/ui/utils/colors'
 import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
 import { CONNECTIONS_WIDTH } from '@/ui/constants/app'
+import { directPath, routeToNode, type Rect } from './connectorRoute'
 
 // Above this many concurrently *running* connections we drop the costly per-line
 // Gaussian-blur glow (lineGlow + beadGlow) and collapse the three-bead trail to a
@@ -76,6 +77,19 @@ function computeConnections(svg: SVGSVGElement, workloads: readonly Workload[]):
         const id = el.getAttribute('data-node-id')
         if (id !== null) nodeElById.set(id, el)
     }
+    // Every node card, in svg coordinates: a line to a card with other cards
+    // in front of it is routed through the gutters around them (connectorRoute).
+    const cardRects: Rect[] = []
+    for (const el of nodeElById.values()) {
+        const r = el.getBoundingClientRect()
+        if (r.width === 0 || r.height === 0) continue
+        cardRects.push({
+            left: r.left - svgRect.left,
+            right: r.right - svgRect.left,
+            top: r.top - svgRect.top,
+            bottom: r.bottom - svgRect.top
+        })
+    }
 
     for (const workload of workloads) {
         const executionNodeId = workloadExecutionNodeId(workload)
@@ -108,21 +122,25 @@ function computeConnections(svg: SVGSVGElement, workloads: readonly Workload[]):
             Math.min(svgRect.height, workloadRect.top + 10 - svgRect.top)
         )
 
-        let startX: number, startY: number, endX: number, endY: number
+        let path: string
         if (nodeIsLeft) {
-            startX = nodeRect.right - svgRect.left
-            startY = nodeAnchorY
-            endX = workloadRect.left - svgRect.left
-            endY = workloadAnchorY
+            path = directPath(
+                { x: nodeRect.right - svgRect.left, y: nodeAnchorY },
+                { x: workloadRect.left - svgRect.left, y: workloadAnchorY }
+            )
         } else {
-            startX = workloadRect.right - svgRect.left
-            startY = workloadAnchorY
-            endX = nodeRect.left - svgRect.left
-            endY = nodeAnchorY
+            path = routeToNode(
+                { x: workloadRect.right - svgRect.left, y: workloadAnchorY },
+                {
+                    left: nodeRect.left - svgRect.left,
+                    right: nodeRect.right - svgRect.left,
+                    top: nodeRect.top - svgRect.top,
+                    bottom: nodeRect.bottom - svgRect.top
+                },
+                nodeAnchorY,
+                cardRects
+            )
         }
-
-        const cpOff = Math.abs(endX - startX) * 0.5
-        const path = `M ${startX},${startY} C ${startX + cpOff},${startY} ${endX - cpOff},${endY} ${endX},${endY}`
 
         const color = getWorkloadStateColor(workload.state)
         result.push({
