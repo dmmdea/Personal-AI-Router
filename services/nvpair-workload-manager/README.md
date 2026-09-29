@@ -75,9 +75,28 @@ work for the node that runs them. The ingress is **off by default** and
 - `POST /v1/workloads/events` takes the same JSON-RPC 2.0 frames as the
   inter-node port: `workload:submitted` / `workload:started` /
   `workload:completed` / `workload:errored` with `params.workloadInfo`, and
-  `workloads:remove` with `params.workloadId`. `originatedFrom` is stamped with
-  this node's UUID when the producer leaves it empty. Producer mistakes are
-  `400`; a broker that cannot be written is `500`.
+  `workloads:remove` with `params.workloadId`. A broker that cannot be written
+  is `500`.
+- The request is checked before its body is read, in this order: a method other
+  than `POST` is `405`; a `Host` that is not a loopback name or address
+  (`localhost`, `127.0.0.0/8`, `::1`) carrying the ingress port is `421`, which
+  is what a DNS-rebinding page sends; any `Origin` header is `403`, because a
+  browser adds one to a cross-origin request and a producer does not; a
+  `Content-Type` other than `application/json` (parameters such as
+  `charset=utf-8` are fine) is `415`; a body over 1 MiB is `413`.
+- The frame is checked as an untrusted producer's, and a mistake is `400`:
+  - `originatedFrom` (inside `params.workloadInfo` for a lifecycle frame, at the
+    top level of `params` for `workloads:remove`) may be absent, `null`, empty or
+    this node's UUID, and is stamped with this node's UUID when empty. Any other
+    value is refused: the ingress reports workloads that run on this node.
+  - `workloadInfo.state` is one of `initializing`, `queued`, `running`,
+    `completed` or `failed`.
+  - `workloadInfo.id` and `workloadId` are at most 256 bytes.
+  - Field names are spelled exactly as documented. The JSON decoders match names
+    without regard to case, so a name such as `originatedfrom` or `Id`, or two
+    keys that differ only by case, is refused.
+  - `resync`, in any spelling, is refused: it is the peers' own re-assertion
+    marker, and a frame carrying it would bypass their dedup.
 - An accepted frame is treated as **local origin**: tracked for re-sync,
   broadcast to pinned peers, and emitted to the broker as `workloads:upsert` /
   `workloads:remove` — the same translation a peer-origin event receives, so
@@ -86,8 +105,10 @@ work for the node that runs them. The ingress is **off by default** and
 
 The trust boundary is the one the proxies' plaintext loopback personality
 already documents: a process that can reach this machine's loopback may report
-work, just as it may already submit it. Prompts, messages and response bodies
-are not part of the frame and must never be added.
+work, just as it may already submit it. A web page in the user's browser is not
+such a process: the Host, Origin and content-type rules above refuse it before
+its body is read. Prompts, messages and response bodies are not part of the
+frame and must never be added.
 
 ## Lifecycle events
 
