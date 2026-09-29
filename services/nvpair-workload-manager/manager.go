@@ -92,6 +92,10 @@ type Manager struct {
 	activeMu    sync.Mutex
 	activeLocal map[workloadKey]workloadEvent
 
+	// selfUUID is this node's stable UUID: the only origin a producer on the
+	// loopback ingress may report workloads under.
+	selfUUID string
+
 	// ingress is the optional loopback listener for third-party local
 	// producers (localingress.go); nil when not configured.
 	ingress *localIngress
@@ -130,10 +134,11 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir, localIngress strin
 		peerSource:  relaySource,
 		relaySource: relaySource,
 		activeLocal: make(map[workloadKey]workloadEvent),
+		selfUUID:    selfUUID,
 	}
 	m.server = NewServer(port, dedup, mesh, m.emitUpsert, m.emitRemove)
 	if localIngress != "" {
-		li, err := newLocalIngress(localIngress, selfUUID, m.ingestLocal)
+		li, err := newLocalIngress(localIngress, m.ingestLocal)
 		if err != nil {
 			return nil, err
 		}
@@ -397,12 +402,18 @@ func (m *Manager) handleLocalRemove(msg *Message) {
 }
 
 // ingestLocal is the loopback ingress's entry: a frame from a local producer
-// that is NOT the broker. It is applied exactly like a Broker-originated frame
-// (re-sync set + peer broadcast) and then emitted UP to the broker as the
-// translated workloads:upsert / workloads:remove — the broker only applies
-// what this process sends it, and that upward path is what updates the local
-// store, the Jobs list, the persisted history and the scheduler's counts.
+// that is NOT the broker. It is vetted as an untrusted producer's first
+// (parseIngressFrame: this node's origin only, a known state, no peer markers),
+// then applied exactly like a Broker-originated frame (re-sync set + peer
+// broadcast) and emitted UP to the broker as the translated workloads:upsert /
+// workloads:remove — the broker only applies what this process sends it, and
+// that upward path is what updates the local store, the Jobs list, the
+// persisted history and the scheduler's counts.
 func (m *Manager) ingestLocal(method string, params json.RawMessage) error {
+	params, err := parseIngressFrame(method, params, m.selfUUID)
+	if err != nil {
+		return err
+	}
 	wl, removeID, removeNode, err := m.applyLocal(method, params)
 	if err != nil {
 		return err
