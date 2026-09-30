@@ -276,3 +276,30 @@ func TestUeventValue(t *testing.T) {
 		t.Errorf("empty uevent DRIVER = %q, want empty", got)
 	}
 }
+
+// TestFindRKNPUDeviceMainlineRknnCore pins the mainline device tree (kernel
+// 6.18+, measured on an Orange Pi 5 with kernel 7.0 + RKNPU v0.9.8): each NPU
+// core is its own "rknn-core" node. With the debugfs counter unreadable, the
+// core count must still come from the SoC table and name the full NPU.
+func TestFindRKNPUDeviceMainlineRknnCore(t *testing.T) {
+	base := t.TempDir()
+	r := rockchipRoots{
+		devfreq: filepath.Join(base, "class", "devfreq"),
+		thermal: filepath.Join(base, "class", "thermal"),
+		debugfs: filepath.Join(base, "debug-unreadable"),
+	}
+	writeFile(t, filepath.Join(r.devfreq, "fdab0000.npu", "device", "uevent"),
+		"DRIVER=RKNPU\nOF_NAME=npu\nOF_FULLNAME=/npu@fdab0000\nOF_COMPATIBLE_0=rockchip,rk3588-rknn-core\nOF_COMPATIBLE_N=1\n")
+	writeThermalZone(t, r.thermal, 6, "npu-thermal", "44100")
+
+	dev, ok := findRKNPUDevice(r)
+	if !ok {
+		t.Fatal("findRKNPUDevice found no NPU bound to an rknn-core node")
+	}
+	if got := dev.cores(); got != 3 {
+		t.Errorf("cores() = %d, want 3 from the rk3588-rknn-core table entry", got)
+	}
+	if name := rknpuRow(dev, dev.cores(), 1).Name; name != "Rockchip RK3588 NPU (3 cores)" {
+		t.Errorf("name = %q", name)
+	}
+}

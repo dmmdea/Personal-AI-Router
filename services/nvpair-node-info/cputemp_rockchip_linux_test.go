@@ -37,6 +37,13 @@ func TestFindCPUTempSourceZoneOrder(t *testing.T) {
 			wantZone: "thermal_zone0",
 		},
 		{
+			// Orange Pi 5 on kernel 7.0 (mainline DT): soc-thermal is renamed
+			// package-thermal and bigcore1 becomes bigcore2.
+			name:     "measured mainline RK3588S zone set: package-thermal, never a cluster zone",
+			zones:    []string{"package-thermal", "bigcore0-thermal", "bigcore2-thermal", "littlecore-thermal", "center-thermal", "gpu-thermal", "npu-thermal"},
+			wantZone: "thermal_zone0",
+		},
+		{
 			name:     "underscored spelling is accepted last",
 			zones:    []string{"gpu-thermal", "cpu_thermal"},
 			wantZone: "thermal_zone1",

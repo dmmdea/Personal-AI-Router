@@ -339,3 +339,56 @@ func TestMergeRockchipStats(t *testing.T) {
 		t.Error("a Rockchip sample must not mark GPU telemetry fresh")
 	}
 }
+
+// TestFindMaliDeviceMainlinePanthor pins the mainline-kernel path (measured on
+// an Orange Pi 5, kernel 7.0): no mali0 misc node; the GPU is DRM card1 bound
+// to panthor, its devfreq node publishes no "load", and there is no driver
+// utilisation attribute. The row must still appear, named from the device-tree
+// compatible, with its temperature, and with utilization reported as
+// unavailable rather than 0 %.
+func TestFindMaliDeviceMainlinePanthor(t *testing.T) {
+	base := t.TempDir()
+	r := rockchipRoots{
+		misc:    filepath.Join(base, "class", "misc"),
+		drm:     filepath.Join(base, "class", "drm"),
+		devfreq: filepath.Join(base, "class", "devfreq"),
+		thermal: filepath.Join(base, "class", "thermal"),
+	}
+	writeFile(t, filepath.Join(r.drm, "card0", "device", "uevent"), "DRIVER=rockchip-drm\nOF_COMPATIBLE_0=rockchip,display-subsystem\n")
+	writeFile(t, filepath.Join(r.drm, "card0-HDMI-A-1", "status"), "disconnected\n")
+	gpuDev := filepath.Join(r.drm, "card1", "device")
+	writeFile(t, filepath.Join(gpuDev, "uevent"), "DRIVER=panthor\nOF_NAME=gpu\nOF_COMPATIBLE_0=rockchip,rk3588-mali\nOF_COMPATIBLE_1=arm,mali-valhall-csf\n")
+	writeFile(t, filepath.Join(gpuDev, "devfreq", "fb000000.gpu", "cur_freq"), "1000000000\n")
+	writeFile(t, filepath.Join(r.devfreq, "fb000000.gpu", "cur_freq"), "1000000000\n")
+	writeThermalZone(t, r.thermal, 0, "package-thermal", "42000")
+	writeThermalZone(t, r.thermal, 5, "gpu-thermal", "41000")
+
+	dev, ok := findMaliDevice(r)
+	if !ok {
+		t.Fatal("findMaliDevice found no GPU on a panthor host")
+	}
+	if dev.name != "Arm Mali-G610 MP4" {
+		t.Errorf("name = %q, want Arm Mali-G610 MP4 from rockchip,rk3588-mali", dev.name)
+	}
+	if dev.node != "fb000000.gpu" || dev.statsKey() != "mali:fb000000.gpu" {
+		t.Errorf("node = %q statsKey = %q", dev.node, dev.statsKey())
+	}
+	if filepath.Base(filepath.Dir(dev.tempPath)) != "thermal_zone5" {
+		t.Errorf("tempPath = %q, want the gpu-thermal zone", dev.tempPath)
+	}
+	if util, ok := dev.readUtilization(); ok {
+		t.Errorf("readUtilization = (%d, true), want no reading: mainline devfreq has no load attribute", util)
+	}
+
+	// An unknown Mali part on panfrost keeps the generic name.
+	writeFile(t, filepath.Join(gpuDev, "uevent"), "DRIVER=panfrost\nOF_COMPATIBLE_0=vendor,unknown-mali\n")
+	if dev, ok := findMaliDevice(r); !ok || dev.name != maliFallbackName {
+		t.Errorf("panfrost unknown part: ok=%v name=%q, want %q", ok, dev.name, maliFallbackName)
+	}
+
+	// No drm root configured and no misc node: no GPU, silently.
+	r.drm = ""
+	if _, ok := findMaliDevice(r); ok {
+		t.Error("findMaliDevice reported a GPU with neither a mali0 node nor a drm root")
+	}
+}
