@@ -52,7 +52,9 @@ var cpuPackageLabels = []string{"package id 0", "tctl", "tdie", "cpu"}
 // bigcore0/bigcore1/littlecore alongside soc-thermal) has no single "the CPU"
 // sensor, so the SoC-wide zone is the honest answer and is preferred over
 // arbitrarily picking one cluster.
-var cpuThermalZoneTypes = []string{"x86_pkg_temp", "cpu-thermal", "soc-thermal", "cpu_thermal"}
+// Mainline RK3588 device trees rename the SoC-wide zone package-thermal (the
+// vendor kernel's soc-thermal), so it takes the same place in the order.
+var cpuThermalZoneTypes = []string{"x86_pkg_temp", "cpu-thermal", "soc-thermal", "package-thermal", "cpu_thermal"}
 
 // hwmonTempSensor is one temp<N>_input of a CPU hwmon driver.
 type hwmonTempSensor struct {
