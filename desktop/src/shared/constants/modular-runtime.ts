@@ -14,6 +14,13 @@
 export const MODULAR_CLUSTER_MANAGER_PORT = 14321
 
 export const MODULAR_NODE_INFO_PATH = '/v1/node-info'
+// `nvpair-node-info`'s default listen port (the default of its `--port` flag).
+export const MODULAR_NODE_INFO_DEFAULT_PORT = 14318
+// The most a node-info answer may weigh, counted after any content decoding. A
+// real answer is a few KiB; the cap exists because the poller reads whatever
+// answers at an address it did not choose, and a configured view-only node is
+// not trusted at all.
+export const MODULAR_NODE_INFO_MAX_BODY_BYTES = 256 * 1024
 
 // Log levels accepted by every backend binary's shared `applog` package
 // (`--log-level` flag / `log/set-level` JSON-RPC). Order is least→most severe.

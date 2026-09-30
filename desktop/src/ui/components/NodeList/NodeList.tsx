@@ -60,6 +60,7 @@ function NodeList() {
                                 nodeId={node.id}
                                 name={node.name}
                                 ipAddress={node.ipAddress}
+                                viewOnly={node.viewOnly}
                             />
                         ))}
                 </div>

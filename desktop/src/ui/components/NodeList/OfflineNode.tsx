@@ -3,7 +3,7 @@
 
 import { Flex, Text } from '@nvidia/foundations-react-core'
 import { useConnectionStore } from '@/ui/stores/connection.store'
-import { LocalBadge } from '@/ui/components/LocalBadge'
+import { LocalBadge, ViewOnlyBadge } from '@/ui/components/LocalBadge'
 
 /**
  * Card for a cluster member that is currently offline (a known member with no
@@ -14,11 +14,13 @@ import { LocalBadge } from '@/ui/components/LocalBadge'
 export default function OfflineNode({
     nodeId,
     name,
-    ipAddress
+    ipAddress,
+    viewOnly
 }: {
     nodeId: string
     name?: string | null
     ipAddress?: string | null
+    viewOnly?: boolean
 }) {
     const isLocal = useConnectionStore(state => state.selfId === nodeId)
     return (
@@ -29,6 +31,7 @@ export default function OfflineNode({
                         {name || ipAddress || nodeId}
                     </Text>
                     {isLocal && <LocalBadge />}
+                    {viewOnly && <ViewOnlyBadge />}
                     <Text kind="body/regular/sm" className="text-subtle-color">
                         (Offline)
                     </Text>
