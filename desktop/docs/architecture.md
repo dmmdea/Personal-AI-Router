@@ -131,7 +131,40 @@ The only direct backend HTTP polling in Electron is `/v1/node-info`: Electron
 polls healthy local and discovered nodes every two seconds because rich
 telemetry is not part of the broker JSON-RPC surface. Consecutive failures back
 off to 4, 8, 16, then 30 seconds; the first success or a changed endpoint
-restores the normal cadence.
+restores the normal cadence. Every poll refuses redirects and reads at most
+256 KiB of body, counted as it streams, so a node cannot move the request or
+make Electron hold an unbounded answer.
+
+### View-only nodes
+
+A machine can be shown on the overview for its telemetry without joining the
+cluster. List it in `<userData>/configs/view-only-nodes.json`, read once when the
+services start:
+
+```json
+[
+    {
+        "name": "Lab GPU box",
+        "address": "192.0.2.10",
+        "port": 14318,
+        "nodeUuid": "0b6f4c1e-8a52-4d3b-9f10-2c7e5a9d3b64"
+    }
+]
+```
+
+`address` must be an IPv4 or IPv6 literal (no hostname, no zone), `port` is
+optional (default 14318, range 1-65535), `name` is 1-64 printable characters and
+`nodeUuid` a UUID. At most 16 entries are used; an invalid entry is skipped with
+a log warning, and a missing or malformed file means no view-only nodes.
+
+The machine is not trusted, and the design keeps it that way: it is held apart
+from the discovered-node map, so it is never sent to the broker, the proxies, the
+scheduler or the cluster manager, cannot be invited, removed or merged by a broker
+snapshot, and gets no engine status. Only this Electron process polls its
+`/v1/node-info`, and it shows telemetry only from an answer whose `hostUuid`
+equals the configured `nodeUuid`. If a discovered node reports the same UUID,
+the discovered node wins and the view-only entry is dropped with a warning. Its
+card is marked "View only" and has no controls.
 
 ## State flow
 

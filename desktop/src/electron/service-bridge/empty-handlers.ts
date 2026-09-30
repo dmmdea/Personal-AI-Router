@@ -684,6 +684,15 @@ async function handleEngineCommand(payload?: WsInvokeRequest<'engine:command'>):
     // Remote peers: `nvpair-engine-manager` exposes `engine:remote-*` client methods
     // (cluster mTLS `ec` surface) for install/start/stop/pull and model ops.
     // Local-only ops are refused in {@link routeRemoteEngineCommand}.
+    if (payload.nodeId && getModularBridgeState().isViewOnlyNode(payload.nodeId)) {
+        supervisor.reportError(
+            `${payload.command} is not available on a view-only node.`,
+            'warning',
+            `engine-cmd:${payload.command}`
+        )
+        return null
+    }
+
     const selfId = getModularBridgeState().getSelfId()
     if (selfId && payload.nodeId && payload.nodeId !== selfId) {
         if (supervisor.hasProcess('broker')) {
@@ -905,6 +914,9 @@ async function handleNodeRemoveMember(
     if (!payload) return { nodeId: '', removed: false }
     const supervisor = getModularSupervisor()
     const state = getModularBridgeState()
+    // A view-only machine is not a member and no service knows it, so there is
+    // nothing to remove and nothing to send the broker.
+    if (state.isViewOnlyNode(payload.nodeId)) return { nodeId: payload.nodeId, removed: false }
     const selfId = state.getSelfId()
     const isSelfLeave = selfId !== null && payload.nodeId === selfId
 

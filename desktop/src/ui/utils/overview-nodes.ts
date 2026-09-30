@@ -33,7 +33,11 @@ function localPlaceholderNode(id: string, name: string, os: PlatformDisplayName)
     }
 }
 
-/** Build the membership-scoped overview, always including the local node. */
+/**
+ * Build the membership-scoped overview, always including the local node. View-only
+ * nodes follow the members: they are configured, untrusted machines shown for
+ * their telemetry, never members.
+ */
 export function buildOverviewNodes(
     nodesMap: ReadonlyMap<string, NodeItem>,
     members: readonly ClusterNode[],
@@ -55,6 +59,10 @@ export function buildOverviewNodes(
             selfId,
             nodesMap.get(selfId) ?? localPlaceholderNode(selfId, selfMember?.name ?? '', platform)
         )
+    }
+
+    for (const node of nodesMap.values()) {
+        if (node.viewOnly && !out.has(node.id)) out.set(node.id, node)
     }
 
     const list = Array.from(out.values())

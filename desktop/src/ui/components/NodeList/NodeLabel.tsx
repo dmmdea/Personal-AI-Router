@@ -3,7 +3,7 @@
 
 import { Flex, Text } from '@nvidia/foundations-react-core'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { LocalBadge } from '@/ui/components/LocalBadge'
+import { LocalBadge, ViewOnlyBadge } from '@/ui/components/LocalBadge'
 
 interface LabelSegment {
     id: string
@@ -14,12 +14,14 @@ export default function NodeLabel({
     name,
     ipAddress,
     gpuLabel,
-    isLocal
+    isLocal,
+    isViewOnly
 }: {
     name: string
     ipAddress: string
     gpuLabel: string | undefined
     isLocal?: boolean
+    isViewOnly?: boolean
 }) {
     const segmentRefs = useRef<(HTMLDivElement | null)[]>([])
     const containerRef = useRef<HTMLDivElement | null>(null)
@@ -104,6 +106,7 @@ export default function NodeLabel({
                             {segment.text}
                         </Text>
                         {isPrimary && isLocal && <LocalBadge />}
+                        {isPrimary && isViewOnly && <ViewOnlyBadge />}
                         {separatorAfter[index] && (
                             <Text
                                 kind="body/regular/lg"
