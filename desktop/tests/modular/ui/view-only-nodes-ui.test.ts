@@ -165,9 +165,9 @@ describe('node card controls', () => {
         expect(nodeCardControls(nodeItem(VIEW_ONLY, { viewOnly: true })).engineSettings).toBe(false)
     })
 
-    it('offers no buttons at all on a view-only node', () => {
-        const controls = nodeCardControls(nodeItem(VIEW_ONLY, { viewOnly: true }))
-
-        expect(Object.values(controls).every(offered => offered === false)).toBe(true)
+    it('offers the performance chart on a view-only node', () => {
+        expect(nodeCardControls(nodeItem(VIEW_ONLY, { viewOnly: true })).performanceChart).toBe(
+            true
+        )
     })
 })

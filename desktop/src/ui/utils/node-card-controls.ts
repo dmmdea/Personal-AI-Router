@@ -14,14 +14,15 @@ interface NodeCardControls {
 
 /**
  * What a node's card may offer. A view-only node is an untrusted machine shown for
- * its telemetry, so its card has nothing to press: no engine control, no settings,
- * and nothing that could reach the cluster or a service on its behalf.
+ * its telemetry, so its card offers no engine control and no settings: nothing that
+ * could reach the cluster or a service on its behalf. The performance chart stays: it
+ * only draws the telemetry already polled, which is the reason the card exists.
  */
 export function nodeCardControls(node: Pick<NodeItem, 'viewOnly'>): NodeCardControls {
     const interactive = node.viewOnly !== true
     return {
         engineToggles: interactive,
         engineSettings: interactive,
-        performanceChart: interactive
+        performanceChart: true
     }
 }
