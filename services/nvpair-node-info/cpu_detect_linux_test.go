@@ -157,6 +157,13 @@ func TestCPUInfoOrFallbackIn(t *testing.T) {
 		t.Errorf("empty ghw cores = %d, want 8", got.Cores)
 	}
 
+	// Mainline kernel (Orange Pi 5 on 7.0): ghw reports only the implementer.
+	// The SoC from the device tree must replace it, not be appended to it.
+	got = cpuInfoOrFallbackIn("ARM", 8, board)
+	if got.Name != "Rockchip RK3588S (Orange Pi 5)" {
+		t.Errorf("bare-vendor ghw name = %q, want %q", got.Name, "Rockchip RK3588S (Orange Pi 5)")
+	}
+
 	x86 := fakeDeviceTree(t, "", nil, 32)
 	got = cpuInfoOrFallbackIn("AMD Ryzen 9 7950X 16-Core Processor", 16, x86)
 	if got.Name != "AMD Ryzen 9 7950X 16-Core Processor" || got.Cores != 16 {

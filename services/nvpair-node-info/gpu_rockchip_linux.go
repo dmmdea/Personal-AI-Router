@@ -56,6 +56,9 @@ const (
 	// driver publishes its only usable load counter.
 	debugfsDir = "/sys/kernel/debug"
 
+	// (drmClassDir, shared with the AMD detector, is where a mainline kernel's
+	// Mali GPU lives: the DRM card whose driver is panthor/panfrost.)
+
 	maliMiscName     = "mali0"
 	maliThermalZone  = "gpu-thermal"
 	maliStatsPrefix  = "mali:"
@@ -77,6 +80,7 @@ const (
 // a struct so tests can point every lookup at a fake tree.
 type rockchipRoots struct {
 	misc       string // /sys/class/misc
+	drm        string // /sys/class/drm; "" skips the mainline (panthor/panfrost) lookup
 	devfreq    string // /sys/class/devfreq
 	thermal    string // /sys/class/thermal
 	debugfs    string // /sys/kernel/debug
@@ -86,6 +90,7 @@ type rockchipRoots struct {
 func systemRockchipRoots() rockchipRoots {
 	return rockchipRoots{
 		misc:       miscClassDir,
+		drm:        drmClassDir,
 		devfreq:    devfreqClassDir,
 		thermal:    thermalClassDir,
 		debugfs:    debugfsDir,
@@ -170,7 +175,7 @@ func findMaliDevice(r rockchipRoots) (maliDevice, bool) {
 		if !os.IsNotExist(err) {
 			slog.Debug("Mali device node unreadable", "dir", dir, "err", err)
 		}
-		return maliDevice{}, false
+		return findMainlineMaliDevice(r)
 	}
 	dev := maliDevice{
 		name:     maliProductName(readSysfs(filepath.Join(dir, "gpuinfo"))),
@@ -203,6 +208,56 @@ func maliDevfreqNode(deviceDir, devfreqRoot string) string {
 		}
 	}
 	return ""
+}
+
+// mainlineMaliDrivers are the upstream DRM drivers for Arm Mali GPUs. panthor
+// drives the CSF parts (the RK3588's Mali-G610), panfrost the older ones.
+var mainlineMaliDrivers = map[string]bool{"panthor": true, "panfrost": true}
+
+// mainlineMaliNames names the GPU from its device-tree compatible string, since
+// the upstream drivers publish no gpuinfo attribute. Unknown parts keep the
+// generic name rather than a guessed one.
+var mainlineMaliNames = map[string]string{
+	"rockchip,rk3588-mali": "Arm Mali-G610 MP4",
+}
+
+// findMainlineMaliDevice finds the Mali GPU on a mainline kernel, where there is
+// no mali0 misc node: the DRM card whose platform device is bound to panthor or
+// panfrost (measured on an Orange Pi 5, kernel 7.0: card1, DRIVER=panthor,
+// OF_COMPATIBLE_0=rockchip,rk3588-mali, devfreq fb000000.gpu). Mainline devfreq
+// has no "load" attribute and the upstream drivers no "utilisation" one, so the
+// row usually carries no utilization there — it is omitted, never invented.
+func findMainlineMaliDevice(r rockchipRoots) (maliDevice, bool) {
+	if r.drm == "" {
+		return maliDevice{}, false
+	}
+	for _, card := range sortedDirNames(r.drm) {
+		if !strings.HasPrefix(card, "card") || strings.Contains(card, "-") {
+			continue // cardN only; skip connector entries such as card0-HDMI-A-1
+		}
+		dir := filepath.Join(r.drm, card, "device")
+		uevent := readSysfs(filepath.Join(dir, "uevent"))
+		if !mainlineMaliDrivers[strings.ToLower(ueventValue(uevent, "DRIVER"))] {
+			continue
+		}
+		name, known := mainlineMaliNames[ueventValue(uevent, "OF_COMPATIBLE_0")]
+		if !known {
+			name = maliFallbackName
+		}
+		dev := maliDevice{
+			name:     name,
+			node:     maliDevfreqNode(dir, r.devfreq),
+			tempPath: findThermalZone(r.thermal, maliThermalZone),
+		}
+		if dev.node != "" {
+			dev.loadPath = firstExistingFile(
+				filepath.Join(dir, "devfreq", dev.node, "load"),
+				filepath.Join(r.devfreq, dev.node, "load"),
+			)
+		}
+		return dev, true
+	}
+	return maliDevice{}, false
 }
 
 // maliProductName derives the display name from the driver's gpuinfo attribute,

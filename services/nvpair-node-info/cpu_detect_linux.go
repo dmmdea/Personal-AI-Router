@@ -80,12 +80,29 @@ func cpuInfoOrFallbackIn(name string, cores uint32, r cpuFallbackRoots) *CPUInfo
 	if out.Name == "" {
 		out.Name, _ = cpuNameFallbackIn(r)
 	} else {
+		if soc != "" && isBareCPUVendor(out.Name) {
+			// On a mainline kernel ghw reports only the CPU implementer ("ARM")
+			// where the vendor kernel gave the SoC ("Rockchip RK3588S"); name the
+			// SoC from the device tree so the row reads the same on both.
+			out.Name = soc
+		}
 		out.Name = mergeCPUName(out.Name, model, soc)
 	}
 	if listed := countProcCPUs(r.cpuinfo); listed > out.Cores {
 		out.Cores = listed
 	}
 	return out
+}
+
+// isBareCPUVendor reports whether a ghw CPU name is only the implementer's name
+// ("ARM") rather than a model — what ghw derives from /proc/cpuinfo's
+// "CPU implementer" line on kernels that print no model name.
+func isBareCPUVendor(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "arm", "arm limited", "arm ltd", "arm ltd.":
+		return true
+	}
+	return false
 }
 
 // cpuNameFallback is the device-tree-only CPU identity: the name to use when

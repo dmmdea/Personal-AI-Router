@@ -64,10 +64,14 @@ const (
 // authoritative even on a SoC this table does not know.
 var rknpuSoCCores = map[string]int{
 	"rockchip,rk3588-rknpu": 3,
-	"rockchip,rk3576-rknpu": 2,
-	"rockchip,rk3568-rknpu": 1,
-	"rockchip,rk3566-rknpu": 1,
-	"rockchip,rk3562-rknpu": 1,
+	// Mainline device trees (kernel 6.18+) describe each RK3588 NPU core as its
+	// own "rknn-core" node; the out-of-tree RKNPU driver binds to them too
+	// (measured on an Orange Pi 5, kernel 7.0 + RKNPU v0.9.8).
+	"rockchip,rk3588-rknn-core": 3,
+	"rockchip,rk3576-rknpu":     2,
+	"rockchip,rk3568-rknpu":     1,
+	"rockchip,rk3566-rknpu":     1,
+	"rockchip,rk3562-rknpu":     1,
 }
 
 // rknpuCorePattern matches one "Core<N>: <pct>%" field of the debugfs load
