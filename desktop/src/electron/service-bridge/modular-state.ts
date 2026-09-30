@@ -31,6 +31,13 @@ import { emitBridgePush } from './broadcaster'
 import { mergePullProgressPercent } from './pull-error-handling'
 import type { JsonObject, JsonRpcNotification, JsonValue } from './json-rpc-subprocess'
 import { serviceLogLevel } from './service-log-level'
+import type { ViewOnlyNodeEntry } from './view-only-nodes'
+import { createStructuredLogger } from '@/shared/utils/log'
+
+const log = createStructuredLogger('service-bridge')
+
+// A view-only machine is untrusted, so what it may make the UI hold is bounded.
+export const VIEW_ONLY_MAX_GPUS = 16
 // Live node sources are the two reverse proxies, relayed through the broker,
 // and the broker's consolidated discovery snapshot. Electron does not consume
 // worker discovery protocols directly.
@@ -712,7 +719,7 @@ function modelItem(name: string, loaded = false): ModelItem {
     }
 }
 
-function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
+function toNodeItem(node: ModularNode, selfId: string | null, viewOnly = false): NodeItem {
     const ipAddress = primaryNodeAddress(node)
     const addresses = nodeAddresses(node)
     // `NodeItem.port` is the node's primary reachable service port: a live
@@ -757,7 +764,8 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
         // discovery/node-info plane reports no OS for remote nodes, so they fall
         // back to a placeholder. Remote OS is not reported by the current
         // discovery/node-info contract.
-        os: node.id === selfId ? platformDisplayName(currentPlatform()) : 'Windows'
+        os: node.id === selfId ? platformDisplayName(currentPlatform()) : 'Windows',
+        ...(viewOnly ? { viewOnly: true } : {})
     }
 }
 
@@ -1033,8 +1041,42 @@ function sameModelsByEngine(
     return true
 }
 
+/** A configured view-only machine: a poll target and a card, and nothing a service hears of. */
+function viewOnlyModularNode(entry: ViewOnlyNodeEntry): ModularNode {
+    return {
+        id: entry.nodeUuid,
+        sources: [],
+        name: entry.name,
+        host: entry.address,
+        trusted: false,
+        clustered: false,
+        nodeInfoPort: entry.port,
+        nodeInfoUp: true,
+        brokerAddresses: [entry.address],
+        proxyAddresses: [],
+        reachableAddress: entry.address,
+        gpus: [],
+        cpu: null,
+        memory: null,
+        models: [],
+        modelsByEngine: {},
+        loadedByEngine: {},
+        engines: emptyEngines(),
+        lastSeen: Date.now()
+    }
+}
+
 class ModularBridgeState {
     private nodes = new Map<string, ModularNode>()
+    /**
+     * Configured view-only machines, keyed by their configured UUID. Held apart
+     * from {@link nodes} on purpose: everything that reaches a service, the
+     * broker's snapshot handling, the remote-engine sweep, the invitable list and
+     * engine status, walks `nodes`, so a machine kept out of it cannot be sent
+     * anywhere, invited, removed by a snapshot, or merged with a discovered node.
+     * It reaches the renderer only as a node card and its metrics.
+     */
+    private viewOnlyNodes = new Map<string, ModularNode>()
     private brokerNodeIds = new Set<string>()
     private errors: ServiceError[] = []
     private workloads = new Map<string, Workload>()
@@ -1148,6 +1190,9 @@ class ModularBridgeState {
         for (const node of Array.from(this.nodes.values())) {
             nodes[node.id] = toNodeItem(node, this.selfId)
         }
+        for (const node of Array.from(this.viewOnlyNodes.values())) {
+            nodes[node.id] = toNodeItem(node, this.selfId, true)
+        }
         return {
             nodes,
             fetchedNodes: true
@@ -1239,6 +1284,7 @@ class ModularBridgeState {
         const trimmed = nodeUuid.trim()
         if (!trimmed || this.selfId === trimmed) return
         this.selfId = trimmed
+        this.evictViewOnlyNode(trimmed)
         emitBridgePush('state:request-refresh', undefined)
     }
 
@@ -1324,8 +1370,8 @@ class ModularBridgeState {
         })
     }
 
-    getNodeInfoPollTargets(): { id: string; hosts: string[]; port: number }[] {
-        const targets: { id: string; hosts: string[]; port: number }[] = []
+    getNodeInfoPollTargets(): { id: string; hosts: string[]; port: number; viewOnly?: boolean }[] {
+        const targets: { id: string; hosts: string[]; port: number; viewOnly?: boolean }[] = []
         for (const node of Array.from(this.nodes.values())) {
             if (!node.nodeInfoUp || node.nodeInfoPort <= 0) continue
             // This machine appears in its own discovery snapshot, but its own
@@ -1350,15 +1396,118 @@ class ModularBridgeState {
             if (hosts.length === 0) continue
             targets.push({ id: node.id, hosts, port: node.nodeInfoPort })
         }
+        // A view-only machine is polled at its one configured address whatever its
+        // last answer said, so one that stopped matching its UUID can recover.
+        for (const node of Array.from(this.viewOnlyNodes.values())) {
+            targets.push({
+                id: node.id,
+                hosts: [node.reachableAddress],
+                port: node.nodeInfoPort,
+                viewOnly: true
+            })
+        }
         return targets
     }
 
-    mergeNodeInfoResponse(nodeId: string, response: JsonValue): void {
-        const node = this.nodes.get(nodeId)
-        if (!node) return
+    /**
+     * Load the configured view-only machines, replacing any earlier set. One whose
+     * UUID is already a discovered node, or is this machine, is left out: the real
+     * node wins, and a view-only card must never stand in for one.
+     */
+    setViewOnlyNodes(entries: readonly ViewOnlyNodeEntry[]): void {
+        const next = new Map<string, ModularNode>()
+        for (const entry of entries) {
+            if (this.nodes.has(entry.nodeUuid) || entry.nodeUuid === this.selfId) {
+                log.warn({
+                    sublevel: 'view-only-nodes',
+                    message: 'View-only node skipped: its UUID belongs to a discovered node',
+                    data: { nodeId: entry.nodeUuid }
+                })
+                continue
+            }
+            next.set(entry.nodeUuid, viewOnlyModularNode(entry))
+        }
+        for (const nodeId of this.viewOnlyNodes.keys()) {
+            if (!next.has(nodeId)) emitBridgePush('nodes:remove', nodeId)
+        }
+        this.viewOnlyNodes = next
+        for (const node of next.values()) this.emitViewOnlyNodeChanged(node)
+    }
 
+    /** Whether `nodeId` is a view-only machine, which no cluster or engine action may target. */
+    isViewOnlyNode(nodeId: string): boolean {
+        return this.viewOnlyNodes.has(nodeId)
+    }
+
+    /** A discovered node claimed the UUID, so the configured entry gives way to it. */
+    private evictViewOnlyNode(nodeId: string): void {
+        if (!this.viewOnlyNodes.delete(nodeId)) return
+        log.warn({
+            sublevel: 'view-only-nodes',
+            message: 'View-only node dropped: a discovered node reports its UUID',
+            data: { nodeId }
+        })
+        emitBridgePush('nodes:remove', nodeId)
+    }
+
+    private emitViewOnlyNodeChanged(node: ModularNode): void {
+        emitBridgePush('nodes:upsert', toNodeItem(node, this.selfId, true))
+        emitBridgePush('metrics:update', toMetrics(node))
+    }
+
+    private mergeViewOnlyTelemetry(node: ModularNode, obj: JsonObject): void {
+        // The machine names itself, so its answer counts only when it names the
+        // configured UUID. Any other answer, or none, also drops what an earlier
+        // answer showed: a different machine may now sit at that address.
+        if (stringValue(obj.hostUuid) !== node.id) {
+            const cleared = !node.nodeInfoUp && !node.cpu && !node.memory && node.gpus.length === 0
+            if (cleared) return
+            const next: ModularNode = {
+                ...node,
+                gpus: [],
+                cpu: null,
+                memory: null,
+                inferenceHardwareIds: undefined,
+                nodeInfoUp: false
+            }
+            this.viewOnlyNodes.set(next.id, next)
+            this.emitViewOnlyNodeChanged(next)
+            return
+        }
+
+        const gpus = gpuArrayValue(obj.GPUs).slice(0, VIEW_ONLY_MAX_GPUS)
+        const cpu = cpuValue(obj.cpu)
+        const memory = memoryValue(obj.memory)
+        const inferenceHardwareIds =
+            optionalStringArrayValue(obj.inference_hardware_ids) ?? inferenceReadyIds(node.id, gpus)
+        if (node.nodeInfoUp && sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)) {
+            emitBridgePush('metrics:update', toMetrics(node))
+            return
+        }
+        const next: ModularNode = {
+            ...node,
+            gpus,
+            cpu,
+            memory,
+            inferenceHardwareIds,
+            nodeInfoUp: true
+        }
+        this.viewOnlyNodes.set(next.id, next)
+        this.emitViewOnlyNodeChanged(next)
+    }
+
+    mergeNodeInfoResponse(nodeId: string, response: JsonValue): void {
         const obj = objectValue(response)
         if (!obj) return
+
+        const viewOnlyNode = this.viewOnlyNodes.get(nodeId)
+        if (viewOnlyNode) {
+            this.mergeViewOnlyTelemetry(viewOnlyNode, obj)
+            return
+        }
+
+        const node = this.nodes.get(nodeId)
+        if (!node) return
 
         // `/v1/node-info` now reports the node's own hostUuid. If it disagrees
         // with the node we polled (the address resolved to a different host),
@@ -2560,6 +2709,7 @@ class ModularBridgeState {
     }
 
     private upsertNode(node: ModularNode, source?: BrokerNodeSource): void {
+        this.evictViewOnlyNode(node.id)
         // Self is identified authoritatively by the cluster-manager's node UUID
         // (`cluster:get-node-id`), which equals the discovery/proxy hostUuid key,
         // so there is no hostname guessing here — `setSelfId` is the sole source.

@@ -3,22 +3,34 @@
 
 import { Text } from '@nvidia/foundations-react-core'
 
-/**
- * Small brand-tinted pill marking the local (this-machine) node in node lists.
- */
-export function LocalBadge() {
+function Pill({ label, color }: { label: string; color: string }) {
     return (
         <Text
             kind="body/regular/xs"
             className="shrink-0 rounded-full px-1.5 py-0.5 uppercase"
             style={{
-                color: 'var(--color-brand, #76b900)',
-                backgroundColor: 'color-mix(in srgb, var(--color-brand, #76b900) 18%, transparent)',
+                color,
+                backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`,
                 letterSpacing: '0.04em',
                 lineHeight: 1
             }}
         >
-            Local
+            {label}
         </Text>
     )
+}
+
+/**
+ * Small brand-tinted pill marking the local (this-machine) node in node lists.
+ */
+export function LocalBadge() {
+    return <Pill label="Local" color="var(--color-brand, #76b900)" />
+}
+
+/**
+ * Small neutral pill marking a view-only node: a machine shown for its telemetry
+ * that is not part of the cluster and cannot be controlled from here.
+ */
+export function ViewOnlyBadge() {
+    return <Pill label="View only" color="var(--text-color-subtle, #a0a0a0)" />
 }

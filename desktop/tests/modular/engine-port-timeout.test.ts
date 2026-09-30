@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
     state: {
         getSelfId: vi.fn(() => 'local-node'),
+        isViewOnlyNode: vi.fn(() => false),
         getProxyPort: vi.fn(() => 11434),
         beginLocalEngineOp: vi.fn(),
         failLocalEngineOp: vi.fn()

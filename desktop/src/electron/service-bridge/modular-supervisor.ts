@@ -39,6 +39,7 @@ import {
     type ModularLogLevel
 } from '@/shared/constants/modular-runtime'
 import { listManualNodeEntries } from './manual-nodes-store'
+import { loadViewOnlyNodes } from './view-only-nodes'
 import {
     MODULAR_RUNTIME_BINARIES,
     modularBinaryFileName
@@ -530,6 +531,9 @@ class ModularSupervisor {
 
         this.isReady = true
         this.updateReadiness()
+        // View-only machines are shown from local config and polled by this app
+        // alone; nothing here hands them to the broker.
+        getModularBridgeState().setViewOnlyNodes(loadViewOnlyNodes())
         startNodeInfoPoller()
         log.info({ sublevel: 'lifecycle', message: 'Started modular service processes' })
     }

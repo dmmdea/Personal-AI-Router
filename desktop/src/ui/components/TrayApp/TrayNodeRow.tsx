@@ -6,7 +6,7 @@ import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
-import { LocalBadge } from '@/ui/components/LocalBadge'
+import { LocalBadge, ViewOnlyBadge } from '@/ui/components/LocalBadge'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { Workload } from '@/shared/types/workloads'
 import { workloadExecutionNodeId } from '@/shared/utils/workloads'
@@ -19,6 +19,7 @@ import NodeActive from '@/ui/components/NodeActive/NodeActive'
 import { hasFirstMetrics } from '@/ui/utils/has-first-metrics'
 import { buildRadialChartMetrics } from '@/ui/utils/build-radial-chart-metrics'
 import { hasInferenceReadyGpu } from '@/ui/utils/gpu-inference'
+import { nodeCardControls } from '@/ui/utils/node-card-controls'
 
 const CHART_SIZE = 48
 
@@ -63,19 +64,21 @@ function TrayNodeRow({ node, activeWorkloads }: { node: NodeItem; activeWorkload
         [activeWorkloads, node.id]
     )
 
+    // A view-only node has no engine settings to open, so its row is not a button.
+    const controls = nodeCardControls(node)
     const openNodeSettings = useCallback(() => {
         window.windowApi.window.focusNode(node.id)
     }, [node.id])
 
     return (
         <div
-            className={`px-4 py-3 items-center overflow-hidden cursor-pointer`}
+            className={`px-4 py-3 items-center overflow-hidden ${controls.engineSettings ? 'cursor-pointer' : ''}`}
             style={{
                 ...gridStyle,
                 display: 'grid',
                 gap: 'calc(var(--spacing)*3)'
             }}
-            onClick={openNodeSettings}
+            onClick={controls.engineSettings ? openNodeSettings : undefined}
         >
             <div className="flex items-center justify-center">
                 <div className="relative">
@@ -104,23 +107,28 @@ function TrayNodeRow({ node, activeWorkloads }: { node: NodeItem; activeWorkload
                             {(node.name || node.ipAddress || '')?.trim().toUpperCase()}
                         </Text>
                         {isLocal && <LocalBadge />}
+                        {node.viewOnly && <ViewOnlyBadge />}
                     </Flex>
-                    <Flex align="center" gap="1">
-                        {isSingleEngine && (
-                            <span
-                                className="inline-block w-1.5 h-1.5 rounded-full"
-                                style={{
-                                    backgroundColor: singleEngineRunning ? '#76b900' : '#666'
-                                }}
-                            />
-                        )}
+                    {controls.engineToggles && (
+                        <Flex align="center" gap="1">
+                            {isSingleEngine && (
+                                <span
+                                    className="inline-block w-1.5 h-1.5 rounded-full"
+                                    style={{
+                                        backgroundColor: singleEngineRunning ? '#76b900' : '#666'
+                                    }}
+                                />
+                            )}
+                            <Text kind="body/regular/xs" className="text-subtle-color">
+                                {servicesLabel}
+                            </Text>
+                        </Flex>
+                    )}
+                    {controls.engineToggles && (
                         <Text kind="body/regular/xs" className="text-subtle-color">
-                            {servicesLabel}
+                            Jobs ({jobCount})
                         </Text>
-                    </Flex>
-                    <Text kind="body/regular/xs" className="text-subtle-color">
-                        Jobs ({jobCount})
-                    </Text>
+                    )}
                 </Stack>
             </div>
         </div>

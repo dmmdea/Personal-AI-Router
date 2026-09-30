@@ -16,4 +16,10 @@ export interface NodeItem {
     allIpAddresses: string[]
     topology: SystemTopology
     os: PlatformDisplayName
+    /**
+     * A machine configured for display only (`view-only-nodes.json`). It is not a
+     * cluster member and is never trusted or paired: this app polls its node-info
+     * endpoint and nothing else, so its card carries no engine controls or actions.
+     */
+    viewOnly?: boolean
 }

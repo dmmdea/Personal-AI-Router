@@ -23,6 +23,7 @@ import NodeChartLegend from './NodeChartLegend'
 import { buildRadialChartMetrics } from '@/ui/utils/build-radial-chart-metrics'
 import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-inference'
 import { memoryUsedBytes, usagePercent } from '@/ui/utils/hardware-rows'
+import { nodeCardControls } from '@/ui/utils/node-card-controls'
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeEngineSettings from './NodeEngineSettings'
 
@@ -35,6 +36,9 @@ interface NodeCardDetailsProps {
 function NodeCardDetails({ node }: NodeCardDetailsProps) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
     const isLocal = useConnectionStore(state => state.selfId === node.id)
+    // A view-only node is an untrusted machine shown for its telemetry: the card
+    // offers nothing to click, and nothing here can reach an engine or the cluster.
+    const controls = nodeCardControls(node)
     const [isExpanded, setIsExpanded] = useState(false)
     const [isEngineSettingsExpanded, setIsEngineSettingsExpanded] = useState(false)
     // Mount the heavy engine editor only after the first expand so N node cards
@@ -152,6 +156,10 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
     // modal, tray) to reveal this node's engine settings and scroll to it.
     useEffect(() => {
         if (focusNodeId !== node.id) return
+        if (!controls.engineSettings) {
+            consumeFocusNode()
+            return
+        }
         setIsEngineSettingsExpanded(true)
         setHasOpenedEngineSettings(true)
         setIsExpanded(false)
@@ -159,7 +167,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
         requestAnimationFrame(() => {
             containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
         })
-    }, [focusNodeId, node.id, consumeFocusNode])
+    }, [focusNodeId, node.id, controls.engineSettings, consumeFocusNode])
 
     // Re-clip while the accordion animates open or closed; the onTransitionEnd
     // below re-enables overflow-visible once a fully-open transition finishes.
@@ -200,36 +208,44 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
         }
     }, [measure, scheduleResize])
 
+    const hasExpandButtons = controls.performanceChart || controls.engineSettings
+
     const expandButtons = (placement: 'left' | 'top') => (
         <>
-            <DismissibleTooltip slotContent="Show performance" placement={placement}>
-                <Button
-                    kind={isExpanded ? 'primary' : 'tertiary'}
-                    color="neutral"
-                    size="tiny"
-                    className="px-2"
-                    onClick={togglePerformance}
-                    aria-label={
-                        isExpanded ? 'Collapse performance metrics' : 'Expand performance metrics'
-                    }
-                    aria-expanded={isExpanded}
-                >
-                    <BarChartOutlined style={{ fontSize: 14 }} />
-                </Button>
-            </DismissibleTooltip>
-            <DismissibleTooltip slotContent="Show engine settings" placement={placement}>
-                <Button
-                    kind={isEngineSettingsExpanded ? 'primary' : 'tertiary'}
-                    color="neutral"
-                    size="tiny"
-                    className="px-2"
-                    onClick={toggleEngineSettings}
-                    aria-label="Engine settings"
-                    aria-expanded={isEngineSettingsExpanded}
-                >
-                    <SettingsOutlined style={{ fontSize: 14 }} />
-                </Button>
-            </DismissibleTooltip>
+            {controls.performanceChart && (
+                <DismissibleTooltip slotContent="Show performance" placement={placement}>
+                    <Button
+                        kind={isExpanded ? 'primary' : 'tertiary'}
+                        color="neutral"
+                        size="tiny"
+                        className="px-2"
+                        onClick={togglePerformance}
+                        aria-label={
+                            isExpanded
+                                ? 'Collapse performance metrics'
+                                : 'Expand performance metrics'
+                        }
+                        aria-expanded={isExpanded}
+                    >
+                        <BarChartOutlined style={{ fontSize: 14 }} />
+                    </Button>
+                </DismissibleTooltip>
+            )}
+            {controls.engineSettings && (
+                <DismissibleTooltip slotContent="Show engine settings" placement={placement}>
+                    <Button
+                        kind={isEngineSettingsExpanded ? 'primary' : 'tertiary'}
+                        color="neutral"
+                        size="tiny"
+                        className="px-2"
+                        onClick={toggleEngineSettings}
+                        aria-label="Engine settings"
+                        aria-expanded={isEngineSettingsExpanded}
+                    >
+                        <SettingsOutlined style={{ fontSize: 14 }} />
+                    </Button>
+                </DismissibleTooltip>
+            )}
         </>
     )
 
@@ -284,6 +300,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                                 ipAddress={node.ipAddress}
                                 gpuLabel={gpuInfo.length > 0 ? gpuInfo[0].name : undefined}
                                 isLocal={isLocal}
+                                isViewOnly={node.viewOnly}
                             />
                         </div>
                         <Flex
@@ -292,32 +309,34 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                             gap="4"
                             className="shrink min-w-0 ml-1 -mt-1"
                         >
-                            <NodeEnginesInline nodeId={node.id} />
+                            {controls.engineToggles && <NodeEnginesInline nodeId={node.id} />}
                         </Flex>
-                        {isNarrow && (
+                        {isNarrow && hasExpandButtons && (
                             <Flex align="center" gap="2" className="ml-1 -mt-0.5">
                                 {expandButtons('top')}
                             </Flex>
                         )}
                     </Stack>
 
-                    {!isNarrow && (
+                    {!isNarrow && hasExpandButtons && (
                         <Stack className="shrink-0 mt-1" gap="2">
                             {expandButtons('left')}
                         </Stack>
                     )}
                 </Flex>
-                <div
-                    style={{
-                        display: 'grid',
-                        gridTemplateRows: isExpanded && metricsReady ? '1fr' : '0fr',
-                        transition: 'grid-template-rows 0.25s ease'
-                    }}
-                >
-                    <div className="overflow-hidden min-h-0">
-                        <NodePerformance node={node} className="mt-5" />
+                {controls.performanceChart && (
+                    <div
+                        style={{
+                            display: 'grid',
+                            gridTemplateRows: isExpanded && metricsReady ? '1fr' : '0fr',
+                            transition: 'grid-template-rows 0.25s ease'
+                        }}
+                    >
+                        <div className="overflow-hidden min-h-0">
+                            <NodePerformance node={node} className="mt-5" />
+                        </div>
                     </div>
-                </div>
+                )}
                 <div
                     style={{
                         display: 'grid',
@@ -340,7 +359,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                                 : 'overflow-hidden'
                         }`}
                     >
-                        {hasOpenedEngineSettings && (
+                        {controls.engineSettings && hasOpenedEngineSettings && (
                             <div className="mt-4">
                                 <NodeEngineSettings nodeId={node.id} />
                             </div>

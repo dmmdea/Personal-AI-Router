@@ -8,6 +8,7 @@ import { createStructuredLogger } from '@/shared/utils/log'
 import {
     MODULAR_NODE_INFO_PATH,
     MODULAR_NODE_INFO_POLL_BACKOFF_MAX_MS,
+    MODULAR_NODE_INFO_MAX_BODY_BYTES,
     MODULAR_NODE_INFO_POLL_INTERVAL_MS,
     MODULAR_NODE_INFO_POLL_TIMEOUT_MS,
     MODULAR_NODE_INFO_WALK_COOLDOWN_MS
@@ -156,7 +157,14 @@ function pollNodeInfoOnce(): void {
         const targetKey = pollTargetKey(target.hosts, target.port)
         if (!pollDue(target.id, targetKey, Date.now())) continue
         inFlight.add(target.id)
-        void pollTarget(target.id, target.hosts, target.port, targetKey, run.signal)
+        void pollTarget(
+            target.id,
+            target.hosts,
+            target.port,
+            targetKey,
+            run.signal,
+            target.viewOnly === true
+        )
             .catch((err: unknown) => {
                 if (run.signal.aborted) return
                 log.warn({
@@ -175,7 +183,8 @@ async function pollTarget(
     hosts: string[],
     port: number,
     targetKey: string,
-    run: AbortSignal
+    run: AbortSignal,
+    viewOnly: boolean
 ): Promise<void> {
     // Every address asked this tick, with the reason it gave nothing back. The
     // outage report reads it, so a node that has gone quiet says whether nothing
@@ -189,7 +198,7 @@ async function pollTarget(
     // address with nothing wrong with it, and every swap costs a reconnect.
     const remembered = rememberedHost(nodeId, hosts)
     if (remembered) {
-        const probe = await probeHost(nodeId, remembered, port, run)
+        const probe = await probeHost(nodeId, remembered, port, run, viewOnly)
         if (run.aborted) return
         if (probe.parsed) {
             accept(nodeId, remembered, port, probe.parsed)
@@ -219,7 +228,7 @@ async function pollTarget(
     // address use up the walk before a working one was ever tried. The answers are
     // then read in the node's published order, so the address used is the same one
     // a sequential walk would have chosen — not whichever replied first.
-    const probes = order.map(host => probeHost(nodeId, host, port, run))
+    const probes = order.map(host => probeHost(nodeId, host, port, run, viewOnly))
     for (const [index, probe] of probes.entries()) {
         const result = await probe
         if (run.aborted) return
@@ -261,7 +270,8 @@ async function probeHost(
     nodeId: string,
     host: string,
     port: number,
-    run: AbortSignal
+    run: AbortSignal,
+    viewOnly: boolean
 ): Promise<Probe> {
     const probe = await fetchNodeInfo(host, port, run)
     // An abandoned run has no verdict to report: its answer belongs to a poller
@@ -274,6 +284,14 @@ async function probeHost(
     // success for this node, but neither should it stop failover to the remaining
     // addresses the intended node published.
     const reportedUuid = nodeInfoHostUuid(probe.parsed)
+    // A view-only machine is not trusted, so it must name itself: an answer with no
+    // hostUuid, or another one, is not the configured machine. The state is told so
+    // it stops showing what an earlier answer said, and nothing of the answer is
+    // echoed into the log.
+    if (viewOnly && reportedUuid !== nodeId) {
+        getModularBridgeState().mergeNodeInfoResponse(nodeId, probe.parsed)
+        return { parsed: null, reason: 'hostUuid does not match the configured node' }
+    }
     if (reportedUuid && reportedUuid !== nodeId) {
         log.verbose({
             sublevel: 'node-info',
@@ -286,12 +304,7 @@ async function probeHost(
 }
 
 /** Remember the address that answered, and merge the telemetry it reported. */
-function accept(
-    nodeId: string,
-    host: string,
-    port: number,
-    parsed: JsonValue
-): void {
+function accept(nodeId: string, host: string, port: number, parsed: JsonValue): void {
     pollChoices.set(nodeId, { host, walkedAt: 0 })
     noteAnswering(nodeId, nodeInfoUrl(host, port))
     getModularBridgeState().mergeNodeInfoResponse(nodeId, parsed)
@@ -409,13 +422,15 @@ async function fetchNodeInfo(host: string, port: number, run: AbortSignal): Prom
     const signal = AbortSignal.any([run, attempt.signal])
 
     try {
-        const response = await fetch(url, { signal })
+        // A redirect would move the request to an address nobody configured or
+        // discovered, so it is an error rather than something to follow.
+        const response = await fetch(url, { signal, redirect: 'error' })
         if (!response.ok) {
             await drainResponseBody(response)
             return { parsed: null, reason: `HTTP ${response.status}` }
         }
 
-        return { parsed: await response.json(), reason: '' }
+        return { parsed: await readBoundedJson(response, signal), reason: '' }
     } catch (err) {
         // The poller stopping is not a verdict on this endpoint: the caller
         // discards the attempt, so no reason is ever read from it.
@@ -433,6 +448,53 @@ async function fetchNodeInfo(host: string, port: number, run: AbortSignal): Prom
     } finally {
         clearTimeout(attemptTimer)
     }
+}
+
+/**
+ * Parse a node-info body without ever holding more than
+ * {@link MODULAR_NODE_INFO_MAX_BODY_BYTES} of it. A declared length over the cap
+ * is refused before a byte is read; the stream is counted regardless, because a
+ * peer can declare less than it sends or send no length at all. `signal` is the
+ * attempt's deadline, so a peer that trickles its body is cut off like one that
+ * never answers.
+ */
+async function readBoundedJson(response: Response, signal: AbortSignal): Promise<JsonValue> {
+    const tooLarge = (): Error =>
+        new Error(`response body over ${MODULAR_NODE_INFO_MAX_BODY_BYTES} bytes`)
+    const body = response.body
+    if (!body) throw new Error('response has no body')
+
+    const declared = Number(response.headers.get('content-length'))
+    if (declared > MODULAR_NODE_INFO_MAX_BODY_BYTES) {
+        await body.cancel()
+        throw tooLarge()
+    }
+
+    const reader = body.getReader()
+    const cancelOnAbort = (): void => {
+        void reader.cancel().catch(() => {})
+    }
+    signal.addEventListener('abort', cancelOnAbort, { once: true })
+    const chunks: Uint8Array[] = []
+    let received = 0
+    try {
+        for (;;) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+            received += chunk.value.byteLength
+            if (received > MODULAR_NODE_INFO_MAX_BODY_BYTES) {
+                await reader.cancel()
+                throw tooLarge()
+            }
+            chunks.push(chunk.value)
+        }
+        // Cancelling the reader ends the stream like a finished body would.
+        signal.throwIfAborted()
+    } finally {
+        signal.removeEventListener('abort', cancelOnAbort)
+        reader.releaseLock()
+    }
+    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)))
 }
 
 /**

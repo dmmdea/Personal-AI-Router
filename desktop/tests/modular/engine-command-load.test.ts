@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
     state: {
-        getSelfId: vi.fn(() => 'local-node')
+        getSelfId: vi.fn(() => 'local-node'),
+        isViewOnlyNode: vi.fn(() => false)
     },
     supervisor: {
         hasProcess: vi.fn(() => true),
