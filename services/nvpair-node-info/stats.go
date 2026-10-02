@@ -35,6 +35,9 @@ type gpuStat struct {
 	// (GPUInfo.utilizationNeedsSample); every other source publishes a stat
 	// only when it read something.
 	UtilizationKnown bool
+	// UtilizationSource names where UtilizationPct came from on a row with
+	// several possible sources (the Windows Hailo row); empty elsewhere.
+	UtilizationSource string
 	// SharedUsed is the bytes of shared system memory the adapter has
 	// allocated (Windows PDH \GPU Adapter Memory\Shared Usage), valid when
 	// SharedUsedKnown. Only rows with GPUInfo.usedIncludesShared read it: an

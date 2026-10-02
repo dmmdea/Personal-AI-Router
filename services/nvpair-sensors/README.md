@@ -96,6 +96,16 @@ change of reason when it cannot read.
   affinity, which the module exposes no way to request anyway. A part that
   refuses either register (a virtualized CPU that traps RAPL, a pre-Sandy-Bridge
   core) logs one line at open and publishes the temperature alone.
+- Hailo (any host with HailoRT installed; nothing runs without it): an
+  **activity estimate** for the accelerator, published as the report's optional
+  `hailo` section. HailoRT on Windows has no busy counter, so the helper finds
+  the processes that have `libhailort.dll` loaded (rescanned every 5 s; PAIR's
+  own `nvpair-*` workers and this service excluded), reads their I/O "other
+  operations" counters every 50 ms, and publishes the share of 50 ms slots in the
+  last 5 s with at least 4 operations — the device calls every inference makes.
+  It needs LocalSystem: an unprivileged reader cannot open other users'
+  processes. Exact at idle and saturation, coarse in between; `nvpair-node-info`
+  uses it when the inference process publishes no activity file of its own.
 - AMD: not yet; the helper reports the vendor in its `error` and `node-info`
   omits the temperature, as before. PawnIO's `AMDFamily17` module does expose
   the Zen RAPL registers (`0xC0010299` / `0xC001029B`) on families 17h–1Ah, so
