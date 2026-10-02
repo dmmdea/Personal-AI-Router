@@ -298,7 +298,7 @@ func startStatsCollector() *statsCollector {
 
 	c.gpuTemps = startGPUTempPoller()
 	c.cpuTemp = startCPUTempPoller()
-	c.accels = startHailoSamplers()
+	c.accels = startHailoSamplers(c.cpuTemp.hailoBusy)
 	c.wg.Add(1)
 	go c.run()
 	c.startGPUInventory()

@@ -748,7 +748,7 @@ func newHailoSampler(key, id string, open hailoOpener) *hailoSampler {
 // startHailoSamplers spins up one sampler per scanned device. Returns nil when
 // the runtime or the hardware is absent, so callers can range over it
 // unconditionally.
-func startHailoSamplers() []*hailoSampler {
+func startHailoSamplers(proxy func() (uint32, bool)) []*hailoSampler {
 	lib, err := hailoRuntime()
 	if err != nil {
 		return nil
@@ -776,7 +776,7 @@ func startHailoSamplers() []*hailoSampler {
 			return dev.temperature, dev.close, nil
 		})
 		if len(ids) == 1 {
-			s.activity = newHailoActivity(os.Getenv)
+			s.activity = newHailoActivity(os.Getenv, proxy)
 		}
 		go s.run()
 		samplers = append(samplers, s)
@@ -795,7 +795,7 @@ func (s *hailoSampler) sample() {
 	s.sampleTemperature()
 	st := gpuStat{TemperatureC: s.tempC}
 	if s.activity != nil {
-		st.UtilizationPct, st.UtilizationKnown = s.activity.sample(s.id)
+		st.UtilizationPct, st.UtilizationKnown, st.UtilizationSource = s.activity.sampleSource(s.id)
 	}
 	if st.TemperatureC == 0 && !st.UtilizationKnown && s.latest.Load() == nil {
 		return

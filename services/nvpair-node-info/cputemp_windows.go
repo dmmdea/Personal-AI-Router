@@ -44,7 +44,15 @@ const (
 type cpuSample struct {
 	celsius uint32
 	watts   float64
+	// hailo is the report's Hailo activity estimate as received (nil when the
+	// helper sent none); freshness is judged when it is read.
+	hailo *hostsensors.HailoActivity
 }
+
+// hailoProxyMaxAge bounds how old an nvpair-sensors Hailo estimate may be when
+// the Hailo sampler uses it: the helper publishes every second and this
+// poller reads every 5 s, so 15 s spans two missed polls.
+const hailoProxyMaxAge = 15 * time.Second
 
 // cpuTempPoller owns the pipe reads and publishes those readings atomically.
 type cpuTempPoller struct {
@@ -116,7 +124,7 @@ func (p *cpuTempPoller) poll() bool {
 	now := p.now()
 	celsius, haveTemp := r.CPUPackage(now, cpuTempMaxAge)
 	watts, _ := r.CPUPackageWatts(now, cpuTempMaxAge)
-	p.latest.Store(&cpuSample{celsius: celsius, watts: watts})
+	p.latest.Store(&cpuSample{celsius: celsius, watts: watts, hailo: r.Hailo})
 	if haveTemp {
 		if !p.announced {
 			slog.Info("CPU temperature source", "helper", "nvpair-sensors",
@@ -162,6 +170,16 @@ func (p *cpuTempPoller) currentPower() float64 {
 		return s.watts
 	}
 	return 0
+}
+
+// hailoBusy returns the helper's Hailo activity estimate when the last report
+// carried a fresh one. Safe on a nil poller.
+func (p *cpuTempPoller) hailoBusy() (uint32, bool) {
+	s := p.sample()
+	if s == nil || s.hailo == nil {
+		return 0, false
+	}
+	return hostsensors.Report{Hailo: s.hailo}.HailoBusy(p.now(), hailoProxyMaxAge)
 }
 
 func (p *cpuTempPoller) sample() *cpuSample {

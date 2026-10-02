@@ -74,7 +74,7 @@ func TestLiveHailoAccelerator(t *testing.T) {
 	}
 	t.Logf("hailo_get_chip_temperature: ts0=%.2f C ts1=%.2f C sample_count=%d", ts0, ts1, samples)
 
-	samplers := startHailoSamplers()
+	samplers := startHailoSamplers(nil)
 	if len(samplers) != 1 {
 		t.Fatalf("startHailoSamplers returned %d samplers, want 1", len(samplers))
 	}

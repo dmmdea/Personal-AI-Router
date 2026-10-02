@@ -323,7 +323,7 @@ func TestHailoActivityRealFile(t *testing.T) {
 			return dir
 		}
 		return ""
-	})
+	}, nil)
 	path := filepath.Join(dir, hailoActivityFile)
 	write := func(body []byte) {
 		t.Helper()
@@ -362,5 +362,74 @@ func TestHailoActivityRealFile(t *testing.T) {
 	a.now = func() time.Time { return time.UnixMilli(now + 10_000) }
 	if _, known := a.sample("x"); known {
 		t.Fatal("a stale file from a live writer produced a figure")
+	}
+}
+
+// The source precedence: a fresh activity file wins; otherwise the
+// nvpair-sensors I/O estimate; otherwise the file's own fallbacks.
+func TestHailoActivitySourcePrecedence(t *testing.T) {
+	const pid = 4242
+	started := int64(1_790_000_000_000)
+	proxyPct, proxyOK := uint32(0), false
+	proxy := func() (uint32, bool) { return proxyPct, proxyOK }
+
+	t.Run("no file, estimate present", func(t *testing.T) {
+		f := &fakeActivity{err: os.ErrNotExist, now: time.UnixMilli(started)}
+		a := f.source()
+		a.proxy = proxy
+		proxyPct, proxyOK = 63, true
+		if pct, known, src := a.sampleSource("x"); !known || pct != 63 || src != utilSourceIOActivity {
+			t.Fatalf("got (%d, %v, %q), want (63, true, io-activity)", pct, known, src)
+		}
+	})
+	t.Run("no file, no estimate", func(t *testing.T) {
+		f := &fakeActivity{err: os.ErrNotExist, now: time.UnixMilli(started)}
+		a := f.source()
+		a.proxy = proxy
+		proxyPct, proxyOK = 0, false
+		if _, known, src := a.sampleSource("x"); known || src != "" {
+			t.Fatalf("got (known %v, %q), want unknown", known, src)
+		}
+	})
+	t.Run("fresh file outranks the estimate", func(t *testing.T) {
+		f := &fakeActivity{now: time.UnixMilli(started + 2000), alive: true}
+		a := f.source()
+		a.proxy = proxy
+		proxyPct, proxyOK = 10, true
+		f.body = activityJSON(pid, started, started+1000, 20_000, 1)
+		a.sampleSource("x") // baseline
+		f.body = activityJSON(pid, started, started+2000, 20_750, 1)
+		if pct, known, src := a.sampleSource("x"); !known || pct != 75 || src != utilSourceActivityFile {
+			t.Fatalf("got (%d, %v, %q), want (75, true, activity-file)", pct, known, src)
+		}
+	})
+	t.Run("gone writer: the estimate outranks the idle fallback", func(t *testing.T) {
+		f := &fakeActivity{now: time.UnixMilli(started + 60_000), alive: false,
+			body: activityJSON(pid, started, started+1000, 500, 0)}
+		a := f.source()
+		a.proxy = proxy
+		proxyPct, proxyOK = 40, true
+		if pct, known, src := a.sampleSource("x"); !known || pct != 40 || src != utilSourceIOActivity {
+			t.Fatalf("got (%d, %v, %q), want (40, true, io-activity)", pct, known, src)
+		}
+		proxyPct, proxyOK = 0, false
+		if pct, known, src := a.sampleSource("x"); !known || pct != 0 || src != utilSourceActivityFile {
+			t.Fatalf("no estimate: got (%d, %v, %q), want (0, true, activity-file)", pct, known, src)
+		}
+	})
+}
+
+// The row on the wire carries the figure and names its source.
+func TestHailoRowCarriesUtilizationSource(t *testing.T) {
+	f := &fakeActivity{err: os.ErrNotExist, now: time.UnixMilli(1_790_000_000_000)}
+	s := newHailoSampler(hailoStatsKey("0000:03:00.0"), "0000:03:00.0", noHailoDevice)
+	s.activity = f.source()
+	s.activity.proxy = func() (uint32, bool) { return 88, true }
+	row := hailoWire(t, s)
+	if !strings.Contains(row, `"utilization_percent":88`) || !strings.Contains(row, `"utilization_source":"io-activity"`) {
+		t.Fatalf("row %s lacks the estimate or its source", row)
+	}
+	if strings.Contains(row, `"utilization_unavailable":true`) {
+		t.Fatalf("row %s still says unavailable", row)
 	}
 }
