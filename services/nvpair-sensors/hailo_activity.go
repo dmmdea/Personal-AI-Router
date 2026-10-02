@@ -66,7 +66,14 @@ func (d *ioDuty) observe(ops uint64, length time.Duration) {
 	if length <= 0 {
 		length = hailoSlot
 	}
-	d.busy[d.next] = ops >= d.floor
+	// The floor is per nominal slot; a long slot (a late tick, the rescan slot)
+	// needs proportionally more operations, so a few stray calls spread over
+	// it do not mark its whole length busy.
+	need := d.floor
+	if length > hailoSlot {
+		need = uint64(math.Ceil(float64(d.floor) * float64(length) / float64(hailoSlot)))
+	}
+	d.busy[d.next] = ops >= need
 	d.length[d.next] = length
 	d.next = (d.next + 1) % len(d.busy)
 	if d.filled < len(d.busy) {
@@ -114,8 +121,19 @@ type trackedProc struct {
 
 // hailoMonitor owns the watched processes and the duty ring. One goroutine
 // drives it (slot); readers take the latest estimate atomically.
+// hailoScan is one scan's result: the candidate processes found, every pid
+// alive at scan time, and whether the scan itself worked. A failed scan keeps
+// the watched set as it is; a process is dropped only when its own counter
+// read fails or its pid is no longer alive — never because a transient open
+// or module-list failure kept it out of one scan's candidates.
+type hailoScan struct {
+	found []hailoProc
+	alive map[uint32]bool
+	ok    bool
+}
+
 type hailoMonitor struct {
-	scan func() []hailoProc
+	scan func() hailoScan
 	now  func() time.Time
 	log  *slog.Logger
 
@@ -127,7 +145,7 @@ type hailoMonitor struct {
 	names  string
 }
 
-func newHailoMonitor(scan func() []hailoProc, now func() time.Time, log *slog.Logger) *hailoMonitor {
+func newHailoMonitor(scan func() hailoScan, now func() time.Time, log *slog.Logger) *hailoMonitor {
 	return &hailoMonitor{
 		scan:  scan,
 		now:   now,
@@ -172,19 +190,20 @@ func (m *hailoMonitor) slot() {
 // rescan adds newly found processes and drops the ones the scan no longer
 // lists. A pid already watched keeps its open handle and baseline.
 func (m *hailoMonitor) rescan() {
-	found := map[uint32]bool{}
-	for _, p := range m.scan() {
-		found[p.pid] = true
+	sc := m.scan()
+	for _, p := range sc.found {
 		if _, ok := m.procs[p.pid]; ok {
 			p.close()
 			continue
 		}
 		m.procs[p.pid] = &trackedProc{hailoProc: p}
 	}
-	for pid, p := range m.procs {
-		if !found[pid] {
-			p.close()
-			delete(m.procs, pid)
+	if sc.ok {
+		for pid, p := range m.procs {
+			if !sc.alive[pid] {
+				p.close()
+				delete(m.procs, pid)
+			}
 		}
 	}
 	names := m.procNames()
@@ -194,12 +213,23 @@ func (m *hailoMonitor) rescan() {
 	}
 }
 
+// hailoMaxNames bounds the process list in a report (the pipe report is
+// capped at 64 KiB and a reader that cannot decode it loses the CPU reading).
+const hailoMaxNames = 16
+
 func (m *hailoMonitor) procNames() []string {
+	seen := map[string]bool{}
 	var names []string
 	for _, p := range m.procs {
-		names = append(names, p.name)
+		if !seen[p.name] {
+			seen[p.name] = true
+			names = append(names, p.name)
+		}
 	}
 	sort.Strings(names)
+	if len(names) > hailoMaxNames {
+		names = names[:hailoMaxNames]
+	}
 	return names
 }
 

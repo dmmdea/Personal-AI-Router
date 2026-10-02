@@ -106,6 +106,17 @@ change of reason when it cannot read.
   It needs LocalSystem: an unprivileged reader cannot open other users'
   processes. Exact at idle and saturation, coarse in between; `nvpair-node-info`
   uses it when the inference process publishes no activity file of its own.
+  To keep a SYSTEM service from reading every process's memory every 5 s, each
+  process is first identified with `PROCESS_QUERY_LIMITED_INFORMATION` (image
+  name, creation time); core system processes (`lsass.exe`, `csrss.exe`,
+  `svchost.exe`, Defender, ...) are never opened for their module list, and a
+  process found without the library is not re-checked for 60 s (so one that
+  loads it late is picked up up to 60 s later). A failed or short scan keeps the
+  processes already watched. **Limit:** the counter counts every
+  `DeviceIoControl`, sockets included, so a process that has libhailort loaded
+  and does heavy network I/O while the device is idle reads busy. The monitor
+  runs only when `libhailort.dll` is installed (checked at service start) and a
+  panic inside it ends the estimate, never the CPU readings.
 - AMD: not yet; the helper reports the vendor in its `error` and `node-info`
   omits the temperature, as before. PawnIO's `AMDFamily17` module does expose
   the Zen RAPL registers (`0xC0010299` / `0xC001029B`) on families 17h–1Ah, so

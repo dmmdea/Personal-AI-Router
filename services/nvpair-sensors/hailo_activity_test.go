@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -54,8 +55,19 @@ func (f *fakeProc) proc(pid uint32, name string) hailoProc {
 		close: func() { f.closed++ }}
 }
 
+// scanOf turns a candidate list into a successful scan in which exactly those
+// pids are alive.
+func scanOf(procs ...hailoProc) hailoScan {
+	alive := map[uint32]bool{}
+	for _, p := range procs {
+		alive[p.pid] = true
+	}
+	return hailoScan{found: procs, alive: alive, ok: true}
+}
+
 func newTestMonitor(scan func() []hailoProc) *hailoMonitor {
-	return newHailoMonitor(scan, func() time.Time { return time.Unix(1_790_000_000, 0) },
+	return newHailoMonitor(func() hailoScan { return scanOf(scan()...) },
+		func() time.Time { return time.Unix(1_790_000_000, 0) },
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -149,7 +161,7 @@ func TestIODutyWeightsSlotsByLength(t *testing.T) {
 func TestHailoMonitorPartialLoad(t *testing.T) {
 	p := &fakeProc{}
 	clock := time.Unix(1_790_000_000, 0)
-	m := newHailoMonitor(func() []hailoProc { return []hailoProc{p.proc(9, "hailortcli.exe")} },
+	m := newHailoMonitor(func() hailoScan { return scanOf(p.proc(9, "hailortcli.exe")) },
 		func() time.Time { clock = clock.Add(hailoSlot); return clock },
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	for i := 0; i < hailoWindowSlots+hailoPublishEvery; i++ {
@@ -161,6 +173,58 @@ func TestHailoMonitorPartialLoad(t *testing.T) {
 	got := m.current()
 	if got == nil || got.BusyPercent < 48 || got.BusyPercent > 52 {
 		t.Fatalf("got %+v, want ~50%%", got)
+	}
+}
+
+// A scan that fails, or that misses a live process (a transient open or
+// module-list failure), keeps the watched set: a saturated device must not
+// read as idle for a window because one scan came back short.
+func TestHailoMonitorKeepsProcessesOnShortScan(t *testing.T) {
+	p := &fakeProc{}
+	var sc hailoScan
+	m := newHailoMonitor(func() hailoScan { return sc },
+		func() time.Time { return time.Unix(1_790_000_000, 0) },
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sc = scanOf(p.proc(5, "hailortcli.exe"))
+	m.slot()
+	sc = hailoScan{ok: false} // EnumProcesses failed
+	m.rescan()
+	sc = hailoScan{alive: map[uint32]bool{5: true}, ok: true} // alive, but not re-found
+	m.rescan()
+	if _, ok := m.procs[5]; !ok {
+		t.Fatal("a live process was dropped by a short scan")
+	}
+	sc = hailoScan{alive: map[uint32]bool{}, ok: true} // gone
+	m.rescan()
+	if _, ok := m.procs[5]; ok || p.closed != 1 {
+		t.Fatalf("a gone process is still watched (closed %d)", p.closed)
+	}
+}
+
+// A long slot needs proportionally more operations to count as busy, so a few
+// stray calls spread over a late tick do not mark its whole length busy.
+func TestIODutyScalesFloorByLength(t *testing.T) {
+	d := newIODuty(2, 4)
+	d.observe(6, 3*hailoSlot) // 6 ops over 3 slots' time: below 12, idle
+	d.observe(4, hailoSlot)   // busy
+	if pct, _ := d.busyPercent(); pct != 25 {
+		t.Fatalf("got %d%%, want 25%% (1 busy slot-length of 4)", pct)
+	}
+}
+
+func TestProcNamesDedupedAndCapped(t *testing.T) {
+	m := newTestMonitor(func() []hailoProc { return nil })
+	for i := 0; i < hailoMaxNames+10; i++ {
+		f := &fakeProc{}
+		name := "a.exe"
+		if i >= 2 {
+			name = fmt.Sprintf("p%02d.exe", i)
+		}
+		m.procs[uint32(i+1)] = &trackedProc{hailoProc: f.proc(uint32(i+1), name)}
+	}
+	names := m.procNames()
+	if len(names) != hailoMaxNames || names[0] != "a.exe" || names[1] == "a.exe" {
+		t.Fatalf("got %v", names)
 	}
 }
 
