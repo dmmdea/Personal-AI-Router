@@ -69,6 +69,12 @@ type GPUInfo struct {
 	// every older reading of the field, so an idle GPU on a node that predates
 	// the marker still reads 0 %.
 	UtilizationUnavailable bool `json:"utilization_unavailable,omitempty"`
+	// UtilizationSource names where utilization_percent came from on a row
+	// that has more than one possible source — the Windows Hailo row:
+	// "activity-file" (the inference process's own duty-cycle file, exact) or
+	// "io-activity" (nvpair-sensors' estimate from the I/O activity of every
+	// process driving the device). Omitted elsewhere.
+	UtilizationSource string `json:"utilization_source,omitempty"`
 	// InferenceReady is false on a row no engine PAIR runs can use — a Mali
 	// GPU, an RKNPU, an Edge TPU, a Hailo module, a Linux Intel iGPU — and
 	// absent everywhere else. It is a pointer so that "not ready" is explicit
@@ -303,6 +309,9 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 				gpu.VramUsedBytes = s.VRAMUsed
 			}
 			gpu.UtilizationPercent = s.UtilizationPct
+			if s.UtilizationKnown {
+				gpu.UtilizationSource = s.UtilizationSource
+			}
 			gpu.TemperatureCelsius = s.TemperatureC
 			gpu.PowerWatts = s.PowerWatts
 		}

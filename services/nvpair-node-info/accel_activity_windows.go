@@ -147,23 +147,54 @@ type hailoActivity struct {
 	tracker   accelActivityTracker
 	lastState accelActivityState
 	logged    bool
+
+	// proxy returns the nvpair-sensors I/O-activity estimate, ok false when
+	// there is no fresh one; nil when no estimate is wired (tests, one-off).
+	proxy        func() (uint32, bool)
+	lastSource   string
+	sourceLogged bool
 }
 
 // newHailoActivity is the live source: the file under accelActivityDir, the
 // real process table and the wall clock.
-func newHailoActivity(env func(string) string) *hailoActivity {
+func newHailoActivity(env func(string) string, proxy func() (uint32, bool)) *hailoActivity {
 	path := filepath.Join(accelActivityDir(env), hailoActivityFile)
 	return &hailoActivity{
 		read:  func() ([]byte, error) { return readAccelActivityFile(path) },
 		alive: accelActivityWriterAlive,
 		now:   time.Now,
+		proxy: proxy,
 	}
 }
+
+// Values of gpuStat.UtilizationSource / GPUInfo.UtilizationSource for a Hailo
+// row: the inference process's own duty-cycle file (exact), or the
+// nvpair-sensors estimate from the I/O activity of every process that drives
+// the device (hostsensors.HailoActivity).
+const (
+	utilSourceActivityFile = "activity-file"
+	utilSourceIOActivity   = "io-activity"
+)
 
 // sample reads the file once and returns the utilization to publish; known
 // is false when there is nothing to publish. It logs one line per state
 // change and none per tick.
 func (a *hailoActivity) sample(device string) (pct uint32, known bool) {
+	pct, known, _ = a.sampleSource(device)
+	return pct, known
+}
+
+// sampleSource is sample plus where the figure came from. Precedence:
+//  1. a fresh activity file — exact, from the process doing the inference;
+//  2. the nvpair-sensors I/O-activity estimate, which sees every process
+//     driving the device (hailortcli, any app), not only the file's writer;
+//  3. the file's own fallbacks (a gone writer reads as idle, otherwise
+//     unavailable).
+//
+// The estimate outranks rule 3 on purpose: "the writer has exited, so the
+// device is idle" was only ever true while that writer was the device's only
+// user.
+func (a *hailoActivity) sampleSource(device string) (pct uint32, known bool, source string) {
 	var parsed accelActivity
 	data, err := a.read()
 	if err == nil {
@@ -174,7 +205,35 @@ func (a *hailoActivity) sample(device string) (pct uint32, known bool) {
 		a.logState(device, state, err)
 		a.lastState, a.logged = state, true
 	}
-	return pct, known
+	if state == activityFresh {
+		a.noteSource(device, utilSourceActivityFile)
+		return pct, known, utilSourceActivityFile
+	}
+	if a.proxy != nil {
+		if p, ok := a.proxy(); ok {
+			a.noteSource(device, utilSourceIOActivity)
+			return p, true, utilSourceIOActivity
+		}
+	}
+	if known {
+		a.noteSource(device, utilSourceActivityFile)
+		return pct, true, utilSourceActivityFile
+	}
+	a.noteSource(device, "")
+	return pct, false, ""
+}
+
+// noteSource logs one line when the utilization source changes.
+func (a *hailoActivity) noteSource(device, source string) {
+	if source == a.lastSource && a.sourceLogged {
+		return
+	}
+	a.lastSource, a.sourceLogged = source, true
+	if source == "" {
+		slog.Info("Hailo utilization unavailable: no activity file and no I/O estimate", "device", device)
+		return
+	}
+	slog.Info("Hailo utilization source", "device", device, "source", source)
 }
 
 func (a *hailoActivity) logState(device string, state accelActivityState, err error) {

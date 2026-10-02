@@ -54,7 +54,36 @@ type Report struct {
 	Schema        int         `json:"schema"`
 	HelperVersion string      `json:"helper_version,omitempty"`
 	CPU           *CPUReading `json:"cpu,omitempty"`
-	Error         string      `json:"error,omitempty"`
+	// Hailo is the Hailo accelerator activity estimate, present only on a host
+	// with HailoRT installed (an additive section: Schema stays 1).
+	Hailo *HailoActivity `json:"hailo,omitempty"`
+	Error string         `json:"error,omitempty"`
+}
+
+// HailoActivity is how busy the Hailo accelerator is, estimated from the
+// processes that drive it.
+//
+// HailoRT on Windows exposes no busy counter (the monitor that feeds
+// `hailortcli monitor` is compiled out of the Windows build, and the firmware's
+// idle-time control has no public API), but every inference is a handful of
+// DeviceIoControl calls on the device from the process that loaded
+// libhailort.dll. The helper — which, as LocalSystem, can inspect every
+// process — samples those processes' I/O "other operations" counters every
+// SlotMS and publishes the share of slots in the last WindowMS that carried
+// device traffic. That is exact at idle and at saturation and overstates a
+// light, bursty load by up to one slot per inference; readers label it an
+// estimate.
+type HailoActivity struct {
+	// BusyPercent is the share of slots with device traffic, 0..100.
+	BusyPercent uint32 `json:"busy_percent"`
+	// Processes names the image(s) whose traffic was counted, for the log.
+	Processes []string `json:"processes,omitempty"`
+	SlotMS    uint32   `json:"slot_ms"`
+	WindowMS  uint32   `json:"window_ms"`
+	// Source names the mechanism, "io-activity".
+	Source string `json:"source"`
+	// SampledAt is the end of the window; readers drop a stale estimate.
+	SampledAt time.Time `json:"sampled_at"`
 }
 
 // CPUReading is the CPU package temperature, the package power draw when the
@@ -118,6 +147,21 @@ func (r Report) CPUPackage(now time.Time, maxAge time.Duration) (celsius uint32,
 		return 0, false
 	}
 	return r.CPU.PackageCelsius, true
+}
+
+// HailoBusy returns the Hailo activity estimate when the report carries one
+// no older than maxAge as of now. Zero is a valid, known reading (idle).
+func (r Report) HailoBusy(now time.Time, maxAge time.Duration) (pct uint32, ok bool) {
+	if r.Hailo == nil {
+		return 0, false
+	}
+	if r.Hailo.SampledAt.IsZero() || now.Sub(r.Hailo.SampledAt) > maxAge || r.Hailo.SampledAt.After(now.Add(maxAge)) {
+		return 0, false
+	}
+	if r.Hailo.BusyPercent > 100 {
+		return 100, true
+	}
+	return r.Hailo.BusyPercent, true
 }
 
 // CPUPackageWatts returns the package power draw when the report carries one

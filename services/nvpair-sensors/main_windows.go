@@ -150,7 +150,12 @@ func main() {
 func runHelper(ctx context.Context, pipe string, interval time.Duration, log *slog.Logger) error {
 	s := startSampler(interval, log, openPackageSensor)
 	defer s.Stop()
-	return servePipe(ctx, pipe, s.report, log)
+	h := startHailoMonitor(ctx, log) // nil on a host without HailoRT
+	return servePipe(ctx, pipe, func() hostsensors.Report {
+		r := s.report()
+		r.Hailo = h.current()
+		return r
+	}, log)
 }
 
 // warn prints a note to stderr without ending the process, for the
