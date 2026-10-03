@@ -83,6 +83,16 @@ func TestLiveIntelNodeInfo(t *testing.T) {
 		if _, present := row["vram_used_bytes"]; present {
 			t.Errorf("%q: vram_used_bytes present (%v); an Intel iGPU row must omit it", name, row["vram_used_bytes"])
 		}
+		// With an idle-residency counter on the host the collector primed its
+		// baseline at start, so a second sample exists by now and the row
+		// must not claim to have no utilization source. An absent
+		// utilization_percent then means a measured idle 0.
+		if cards := listIntelCards(drmClassDir); len(cards) > 0 && len(intelIdleCounters(cards[0])) > 0 {
+			if unavailable, _ := row["utilization_unavailable"].(bool); unavailable {
+				t.Errorf("%q: utilization_unavailable is true although the driver publishes an idle-residency counter", name)
+			}
+			t.Logf("%q: utilization_percent=%v (absent = measured idle)", name, row["utilization_percent"])
+		}
 	}
 	if !sawIntel {
 		t.Error("no Intel row in the assembled response")
