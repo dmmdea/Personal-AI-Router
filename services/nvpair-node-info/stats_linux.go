@@ -99,6 +99,11 @@ type statsCollector struct {
 	// where the counter is root-only.
 	cpuPower cpuPowerSource
 
+	// intelUtil derives Intel GPU utilization from the idle-residency
+	// counters (gpu_intel_busy_linux.go). It holds the previous counter
+	// readings, so only the ticker goroutine may use it, like prevCPU.
+	intelUtil *intelUtilSampler
+
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -118,6 +123,10 @@ func startStatsCollector() *statsCollector {
 	// Prime the CPU baseline so the first tick produces a real delta rather
 	// than a spurious reading (with no previous sample, util reports 0).
 	c.prevCPU = readCPUTimes()
+	// Same for the Intel GPU idle-residency baseline: its busy figure is a
+	// derivative, so the first tick needs a previous reading to subtract from.
+	c.intelUtil = newIntelUtilSampler()
+	c.intelUtil.sample(listIntelCards(drmClassDir), time.Now())
 	c.accels = startAccelSamplers(listApexDevices())
 	c.cpuTemp = findCPUTempSource()
 	if c.cpuTemp.path != "" {
@@ -205,7 +214,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	applyGPUStats(previous, snap, gpu, sampledAt)
 	c.mergeAccelStats(snap)
 	mergeRockchipStats(snap)
-	mergeIntelStats(snap)
+	mergeIntelStats(c.intelUtil, snap)
 	return snap
 }
 

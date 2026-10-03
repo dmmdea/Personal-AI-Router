@@ -15,6 +15,7 @@ import (
 // a regression here would let a saturated Edge TPU push a node's GPU pressure
 // band up for LLM work the GPU could still take.
 func TestMaxGPUUtilization(t *testing.T) {
+	ready, notReady := true, false
 	cases := []struct {
 		name string
 		gpus []GPUInfo
@@ -48,6 +49,28 @@ func TestMaxGPUUtilization(t *testing.T) {
 				{Name: "Google Coral Edge TPU", Kind: GPUKindAccelerator, UtilizationPercent: 100},
 			},
 			want: 0,
+		},
+		{
+			// A Linux Intel iGPU (or a Mali GPU) has an empty Kind but says it
+			// cannot run inference: a busy compositor on it must not read as
+			// pressure on a node whose NVIDIA GPU is idle.
+			name: "a row that is not inference-ready is excluded",
+			gpus: []GPUInfo{
+				{Name: "NVIDIA A2", UtilizationPercent: 3},
+				{Name: "Intel UHD Graphics 630", UtilizationPercent: 90, InferenceReady: &notReady},
+			},
+			want: 3,
+		},
+		{
+			name: "only a not-inference-ready row reads as idle",
+			gpus: []GPUInfo{{Name: "Intel UHD Graphics 630", UtilizationPercent: 90, InferenceReady: &notReady}},
+			want: 0,
+		},
+		{
+			// An explicit true, like an absent value, makes no exclusion.
+			name: "an inference-ready row counts",
+			gpus: []GPUInfo{{Name: "Intel Arc A380", UtilizationPercent: 55, InferenceReady: &ready}},
+			want: 55,
 		},
 	}
 	for _, tc := range cases {

@@ -498,10 +498,19 @@ const GPUKindAccelerator = "npu"
 // higher pressure band for work it could serve; the same is true of every
 // future Kind, so the rule is stated as "GPUs only" rather than as a list of
 // the kinds known when it was written.
+//
+// A row that says InferenceReady is false is skipped for the same reason, even
+// with an empty Kind: a Mali GPU or a Linux Intel iGPU is listed so clients
+// show it, but no engine PAIR schedules can run there, so its load (a
+// compositor, video decode) must not raise the pressure of a node whose
+// inference GPU is idle. An absent InferenceReady makes no claim and counts.
 func MaxGPUUtilization(gpus []GPUInfo) uint32 {
 	var utilization uint32
 	for i := range gpus {
 		if gpus[i].Kind != "" {
+			continue
+		}
+		if gpus[i].InferenceReady != nil && !*gpus[i].InferenceReady {
 			continue
 		}
 		if gpus[i].UtilizationPercent > utilization {
