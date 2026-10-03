@@ -4,7 +4,11 @@
 import { useMemo, memo } from 'react'
 import { Card, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { Workload } from '@/shared/types/workloads'
-import { workloadExecutionNodeId } from '@/shared/utils/workloads'
+import {
+    parseWorkloadRequester,
+    workloadExecutionNodeId,
+    workloadNodeRowLabel
+} from '@/shared/utils/workloads'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { getWorkloadColorBar } from '@/ui/utils/colors'
@@ -54,7 +58,17 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
         if (!workload.originatedFrom) return ''
         return state.nodes.get(workload.originatedFrom)?.name ?? ''
     })
-    const ranOnLabel = workload.state === 'running' ? 'Running on' : 'Ran on'
+    const requester = useMemo(
+        () => parseWorkloadRequester(workload.requesterId),
+        [workload.requesterId]
+    )
+    // A fleet request's origin node is just the node that served it, so the asker
+    // is the meaningful "requested from". Session/other requesters keep the origin
+    // node and get a separate "Requested by" line.
+    const requestedFromText = requester?.kind === 'fleet' ? requester.asker : requestedFromNodeText
+    const requestedByText =
+        requester?.kind === 'session' || requester?.kind === 'other' ? requester.label : ''
+    const ranOnLabel = workloadNodeRowLabel(workload)
     const barColor = useMemo(() => getWorkloadColorBar(workload.state), [workload.state])
 
     const subtext = useMemo(() => {
@@ -129,15 +143,25 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                     </Text>
                 </Flex>
 
-                {(requestedFromNodeText || ranOnNodeText) && (
+                {(requestedFromText || requestedByText || ranOnNodeText) && (
                     <Stack gap="0" className="mt-1">
-                        {requestedFromNodeText && (
+                        {requestedFromText && (
                             <Flex align="center" wrap="wrap" gap="1">
                                 <Text kind="body/regular/sm" className="text-subtle-color">
                                     Requested from
                                 </Text>
                                 <Text kind="body/regular/sm" className="text-subtle-color">
-                                    {requestedFromNodeText}
+                                    {requestedFromText}
+                                </Text>
+                            </Flex>
+                        )}
+                        {requestedByText && (
+                            <Flex align="center" wrap="wrap" gap="1">
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    Requested by
+                                </Text>
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    {requestedByText}
                                 </Text>
                             </Flex>
                         )}

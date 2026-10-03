@@ -36,3 +36,73 @@ export function workloadKey(originatedFrom: string | null, id: string): string {
 export function workloadExecutionNodeId(workload: Pick<Workload, 'scheduledOn'>): string | null {
     return workload.scheduledOn ?? null
 }
+
+/**
+ * Label for the "which node" row on a job card, matched to the job's state so a
+ * job that never ran is not described as having run.
+ *
+ * `workloadExecutionNodeId` only supplies the node name; the verb has to say
+ * what happened there. A failed job with no `startedAt` was scheduled (or
+ * failed before it began) but never executed, so it reads "Never started on".
+ */
+export function workloadNodeRowLabel(workload: Pick<Workload, 'state' | 'startedAt'>): string {
+    switch (workload.state) {
+        case 'running':
+            return 'Running on'
+        case 'initializing':
+            return 'Starting on'
+        case 'queued':
+            return 'Queued on'
+        case 'completed':
+            return 'Ran on'
+        case 'failed':
+            return workload.startedAt != null ? 'Ran on' : 'Never started on'
+    }
+}
+
+/** Who asked for a workload, parsed from the backend's free-form `requesterId`. */
+export type WorkloadRequester =
+    | { kind: 'fleet'; asker: string }
+    | { kind: 'session'; label: string }
+    | { kind: 'other'; label: string }
+
+const REQUESTER_HARNESS_PREFIX = /^offload-harness(?:\/|$)/
+const REQUESTER_FLEET_PREFIX = 'fleet:'
+const REQUESTER_SESSION_UUID =
+    /^([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/|$)/i
+const REQUESTER_ASKER_MAX = 64
+const REQUESTER_LABEL_MAX = 48
+
+/**
+ * Parse a workload's `requesterId` into something a person can read.
+ *
+ * A leading `offload-harness` segment (and the one `/` after it) is the harness
+ * namespace and carries no information, so it is dropped. What remains is one of:
+ * `fleet:<asker>[/...]` (a fleet seat asking on someone's behalf, shown by the
+ * asker's name), a session UUID (shown as `session <first 8 hex>`), or anything
+ * else (shown verbatim, truncated to 48 chars with an ellipsis). Empty or
+ * missing ids yield `null` so the card draws nothing extra.
+ */
+export function parseWorkloadRequester(
+    requesterId: string | null | undefined
+): WorkloadRequester | null {
+    if (requesterId == null) return null
+    const rest = requesterId.trim().replace(REQUESTER_HARNESS_PREFIX, '').trim()
+    if (rest === '') return null
+
+    if (rest.startsWith(REQUESTER_FLEET_PREFIX)) {
+        const asker = rest
+            .slice(REQUESTER_FLEET_PREFIX.length)
+            .split('/')[0]
+            .trim()
+            .slice(0, REQUESTER_ASKER_MAX)
+        if (asker !== '') return { kind: 'fleet', asker }
+    }
+
+    const uuid = REQUESTER_SESSION_UUID.exec(rest)
+    if (uuid) return { kind: 'session', label: `session ${uuid[1].toLowerCase()}` }
+
+    const label =
+        rest.length > REQUESTER_LABEL_MAX ? `${rest.slice(0, REQUESTER_LABEL_MAX - 1)}…` : rest
+    return { kind: 'other', label }
+}
