@@ -165,6 +165,52 @@ func TestDetectIntelGPUsIntegratedRow(t *testing.T) {
 	}
 }
 
+// TestIntegratedRowBusyFigureNeverFeedsNodePressure pins the consumer side of
+// the iGPU utilization estimate, on the bytes the scanner and broker receive.
+// The row has an empty Kind, so a Kind-only filter would count it: a busy
+// compositor on the iGPU would then raise the pressure band of an NVIDIA+Intel
+// node whose inference GPU is idle. The row's own inference_ready:false is
+// what excludes it; a discrete Arc card, which makes no such claim, counts.
+func TestIntegratedRowBusyFigureNeverFeedsNodePressure(t *testing.T) {
+	f := newIntelFakeTree(t)
+	f.addCard("card1", "0000:00:02.0", "i915", igpuAttrs(nil))
+	f.addCard("card2", "0000:03:00.0", "xe", map[string]string{
+		"vendor": "0x8086", "device": "0xe20b", "mem_info_vram_total": "12884901888",
+	})
+	rows := detectIntelGPUs(f.drmRoot)
+	if len(rows) != 2 {
+		t.Fatalf("detectIntelGPUs = %d rows, want 2: %+v", len(rows), rows)
+	}
+	var integrated, discrete GPUInfo
+	for _, r := range rows {
+		if r.MemoryPool == noderec.GPUMemoryPoolUnified {
+			integrated = r
+		} else {
+			discrete = r
+		}
+	}
+	integrated.UtilizationPercent, discrete.UtilizationPercent = 100, 40
+	integrated.UtilizationUnavailable, discrete.UtilizationUnavailable = false, false
+
+	asWire := func(rows ...GPUInfo) []noderec.GPUInfo {
+		raw, err := json.Marshal(rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []noderec.GPUInfo
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := noderec.MaxGPUUtilization(asWire(integrated)); got != 0 {
+		t.Errorf("an iGPU busy at 100%% contributed %d to node GPU pressure, want 0", got)
+	}
+	if got := noderec.MaxGPUUtilization(asWire(integrated, discrete)); got != 40 {
+		t.Errorf("iGPU 100%% + discrete 40%% = %d, want 40 (only the discrete card counts)", got)
+	}
+}
+
 // TestDetectIntelGPUsIntegratedRowWireShape is the defect itself, asserted on
 // the bytes a client receives rather than on the struct. The fault was never
 // in this detector: it set a flag, and response assembly copied the HOST's
