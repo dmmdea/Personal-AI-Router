@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"nvpair-shared/gpunames"
 	"nvpair-shared/noderec"
@@ -39,13 +40,16 @@ import (
 //
 // and, just as importantly, what it does NOT give us:
 //
-//   - No busy percentage. i915 keeps its engine-busy counters in a PMU
-//     exposed through perf_event_open, which is root-gated by default
+//   - No busy percentage attribute. i915 keeps its engine-busy counters in a
+//     PMU exposed through perf_event_open, which is root-gated by default
 //     (perf_event_paranoid), not in sysfs. There is no unprivileged sysfs
-//     attribute equivalent to amdgpu's gpu_busy_percent. So an Intel row
-//     carries NO utilization_percent at all rather than a fabricated 0, and
-//     sets utilization_unavailable so a client can tell the absence from an
-//     idle reading (utilization_percent is omitempty, so a measured 0 is
+//     attribute equivalent to amdgpu's gpu_busy_percent. What there is, is
+//     the RC6 idle residency counter (and xe's GT idle residency), from which
+//     gpu_intel_busy_linux.go derives an estimate over time. Until that has a
+//     delta to work with, and on a kernel that exposes neither counter, an
+//     Intel row carries NO utilization_percent at all rather than a fabricated
+//     0, and sets utilization_unavailable so a client can tell the absence from
+//     an idle reading (utilization_percent is omitempty, so a measured 0 is
 //     absent too) — "idle" and "we cannot tell" must never render the same.
 //   - No temperature on an integrated GPU. The only sensor near it is the CPU
 //     package sensor, which is the CPU's reading and is already published as
@@ -98,6 +102,7 @@ var intelDrivers = map[string]bool{"i915": true, "xe": true}
 type intelCard struct {
 	card      string // DRM node name, e.g. "card1"
 	index     int    // the N of card<N>, for a stable numeric inventory order
+	cardDir   string // <drmRoot>/card<N>, where i915 keeps gt/ and power/
 	deviceDir string // <drmRoot>/card<N>/device
 	deviceID  string // PCI device id, lowercase hex without "0x", e.g. "3e98"
 	driver    string // bound kernel driver, "i915" or "xe"
@@ -117,20 +122,28 @@ type intelCard struct {
 var intelDRMUnreadable sync.Once
 
 // detectIntelGPUs returns one inventory row per Intel adapter under drmRoot,
-// in card-number order. Utilization and (on an iGPU) temperature are left
-// absent on purpose — see the ceilings at the top of this file — so the only
-// dynamic field an Intel row can gain is a discrete Arc card's temperature,
-// merged in by mergeIntelStats.
+// in card-number order. A temperature (on an iGPU) is left absent on purpose —
+// see the ceilings at the top of this file — so the dynamic fields an Intel row
+// can gain are a discrete Arc card's temperature and the utilization derived
+// from the idle-residency counter, both merged in by mergeIntelStats.
 func detectIntelGPUs(drmRoot string) []GPUInfo {
 	var out []GPUInfo
 	for _, c := range listIntelCards(drmRoot) {
 		row := GPUInfo{
 			Name:     intelModelName(c.deviceID),
 			statsKey: c.statsKey,
-			// No unprivileged busy counter exists (see the top of this
-			// file), so the row says so rather than leaving an absent
-			// utilization for a client to read as idle.
-			UtilizationUnavailable: true,
+		}
+		if len(intelIdleCounters(c)) > 0 {
+			// The driver publishes an idle-residency counter, so utilization
+			// is derived from it (gpu_intel_busy_linux.go). buildResponseAt
+			// publishes the row as UtilizationUnavailable until the sampler
+			// has a reading, so an absent figure never reads as idle.
+			row.utilizationNeedsSample = true
+		} else {
+			// No counter this service can read (see the top of this file), so
+			// the row says so rather than leaving an absent utilization for a
+			// client to read as idle.
+			row.UtilizationUnavailable = true
 		}
 		if c.discrete {
 			// Only if the driver actually publishes it: i915 does not expose
@@ -193,6 +206,7 @@ func listIntelCards(drmRoot string) []intelCard {
 		c := intelCard{
 			card:      e.Name(),
 			index:     index,
+			cardDir:   filepath.Join(drmRoot, e.Name()),
 			deviceDir: deviceDir,
 			deviceID:  intelDeviceID(deviceDir),
 			driver:    driver,
@@ -255,41 +269,86 @@ func intelDiscrete(c intelCard) bool {
 	return haveVRAM
 }
 
-// mergeIntelStats folds each Intel card's hwmon temperature into the
-// snapshot's GPU map under its statsKey. In practice that means discrete Arc
-// cards only: an integrated GPU registers no hwmon of its own (verified on the
-// measured i915 host, whose device directory has no hwmon at all), so this
-// adds nothing and allocates nothing there.
+// mergeIntelStats folds each Intel card's samples into the snapshot's GPU map
+// under its statsKey: the hwmon temperature of a discrete Arc card (an
+// integrated GPU registers no hwmon of its own — verified on the measured i915
+// host, whose device directory has no hwmon at all), and the utilization the
+// idle-residency sampler derived for any card that has a counter
+// (gpu_intel_busy_linux.go).
 //
 // It runs after applyGPUStats for the same reason mergeRockchipStats does: on
 // a stale-preserve tick the snapshot's GPU map aliases the already-published
 // previous map, so it must be cloned before anything is added. And like the
 // accelerator and Rockchip samples it deliberately leaves GPUSampledAt
-// untouched — a temperature is not a utilization sample, and i915 exposes no
-// utilization at all, so an Intel reading must never advertise this host as
-// having live GPU telemetry.
-func mergeIntelStats(snap *statsSnapshot) {
-	mergeIntelStatsFrom(drmClassDir, snap)
+// untouched — neither a temperature nor an integrated GPU's utilization is
+// telemetry of a device PAIR's engines run on (the row is inference_ready:false),
+// so an Intel reading must never advertise this host as having live GPU
+// telemetry.
+func mergeIntelStats(util *intelUtilSampler, snap *statsSnapshot) {
+	mergeIntelSamples(drmClassDir, util, time.Now(), snap)
 }
 
-// mergeIntelStatsFrom is mergeIntelStats with the class root injected, so the
-// merge itself is testable against a fake tree instead of whatever GPUs the
-// test host happens to have.
+// mergeIntelStatsFrom is mergeIntelStats for the temperature alone with the
+// class root injected, so the merge itself is testable against a fake tree
+// instead of whatever GPUs the test host happens to have.
 func mergeIntelStatsFrom(drmRoot string, snap *statsSnapshot) {
-	temps := intelTemperatures(drmRoot)
-	if len(temps) == 0 {
+	mergeIntelSamples(drmRoot, nil, time.Time{}, snap)
+}
+
+// mergeIntelSamples is the merge with every input injected: the class root, the
+// utilization sampler (nil skips utilization) and the sample time.
+//
+// A card whose sampler has no reading this tick publishes none. When the map
+// being merged into already carries a known utilization for that card — which
+// it can, because a stale-preserve tick aliases the previous snapshot's map —
+// that entry is cleared, so a reading that has gone away is not frozen on the
+// wire by the stale-preserve path. Where there is nothing to add and nothing to
+// clear the map is left exactly as it was and nothing is allocated, which is
+// the ordinary case on a host whose iGPU has no counter yet.
+func mergeIntelSamples(drmRoot string, util *intelUtilSampler, now time.Time, snap *statsSnapshot) {
+	cards := listIntelCards(drmRoot)
+	if len(cards) == 0 {
 		return
 	}
-	merged := make(map[string]gpuStat, len(snap.GPU)+len(temps))
-	for k, v := range snap.GPU {
-		merged[k] = v
+	temps := intelTemperaturesOf(cards)
+	var pcts map[string]uint32
+	if util != nil {
+		pcts = util.sample(cards, now)
 	}
-	for key, temp := range temps {
+	var merged map[string]gpuStat
+	edit := func(key string, fn func(*gpuStat)) {
+		if merged == nil {
+			merged = make(map[string]gpuStat, len(snap.GPU)+len(cards))
+			for k, v := range snap.GPU {
+				merged[k] = v
+			}
+		}
 		stat := merged[key]
-		stat.TemperatureC = temp
+		fn(&stat)
 		merged[key] = stat
 	}
-	snap.GPU = merged
+	for _, c := range cards {
+		if temp, ok := temps[c.statsKey]; ok {
+			edit(c.statsKey, func(s *gpuStat) { s.TemperatureC = temp })
+		}
+		if util == nil {
+			continue
+		}
+		if pct, ok := pcts[c.statsKey]; ok {
+			edit(c.statsKey, func(s *gpuStat) {
+				s.UtilizationPct = pct
+				s.UtilizationKnown = true
+			})
+		} else if snap.GPU[c.statsKey].UtilizationKnown {
+			edit(c.statsKey, func(s *gpuStat) {
+				s.UtilizationPct = 0
+				s.UtilizationKnown = false
+			})
+		}
+	}
+	if merged != nil {
+		snap.GPU = merged
+	}
 }
 
 // intelTemperatures samples every Intel card under drmRoot that exposes a
@@ -298,8 +357,12 @@ func mergeIntelStatsFrom(drmRoot string, snap *statsSnapshot) {
 // entirely, so a transient sysfs failure keeps the row's previous value rather
 // than publishing a zero over it.
 func intelTemperatures(drmRoot string) map[string]uint32 {
+	return intelTemperaturesOf(listIntelCards(drmRoot))
+}
+
+func intelTemperaturesOf(cards []intelCard) map[string]uint32 {
 	var temps map[string]uint32
-	for _, c := range listIntelCards(drmRoot) {
+	for _, c := range cards {
 		temp, ok := intelHwmonTempC(c.deviceDir)
 		if !ok {
 			continue
