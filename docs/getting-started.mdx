@@ -264,8 +264,11 @@ curl -N <PAIR_BASE_URL>/api/chat \
 ```
 
 Then confirm the request was routed: open **Overview**, use the **Jobs** filter in
-the left column, and read **Ran on** or **Running on** on the job card to identify
-the serving node.
+the left column, and read **Running on** (in progress) or **Ran on** (finished) on the job card to
+identify the serving node. A job that was queued, still starting, or failed
+before it began reads **Queued on**, **Starting on** or **Never started on**
+instead. The card also shows **Requested from** (the asking node or fleet
+client) and, when known, **Requested by** (the requesting session).
 
 ![A job card under the Jobs filter naming the node that served the request.](assets/onboarding/getting-started/09-job-served-by-node.png)
 
@@ -486,7 +489,8 @@ A reply alone does not prove routing. To identify the serving node:
 
 1. Open **Overview**.
 2. Use the **Jobs** filter in the left column.
-3. Read **Ran on** or **Running on** on the job card.
+3. Read **Running on** or **Ran on** on the job card (**Queued on**, **Starting on**
+   or **Never started on** mean the job has not run yet).
 
 ### 5. Verify Cluster Routing
 
