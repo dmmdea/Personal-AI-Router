@@ -13,9 +13,10 @@ package main
 import "nvpair-shared/discovery"
 
 type (
-	RawNode        = discovery.Node
-	DiscoveryEvent = discovery.Event
-	Discovery      = discovery.Browser
+	RawNode         = discovery.Node
+	DiscoveryEvent  = discovery.Event
+	Discovery       = discovery.Browser
+	DiscoveryOption = discovery.Option
 )
 
 // NewDiscovery builds the node browser with the shared defaults.
@@ -30,6 +31,10 @@ var WithLivenessProbe = discovery.WithLivenessProbe
 // uuid= rather than the mDNS instance name (matching cluster-manager). Two hosts
 // that share a hostname but hold distinct UUIDs must not collapse into one entry.
 var WithKeyFunc = discovery.WithKeyFunc
+
+// WithSupplement re-exports the shared option so the daemon can fold members the
+// tailnet locator found into each scan alongside the ones mDNS heard.
+var WithSupplement = discovery.WithSupplement
 
 // UUIDFromTXT re-exports the shared uuid= extractor, used as the browser's key
 // function (see WithKeyFunc).

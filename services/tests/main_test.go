@@ -34,6 +34,12 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// The scanner's tailnet locator would read the developer's real Tailscale
+	// client and handshake with real tailnet devices; every binary these tests
+	// start inherits this environment, which keeps them hermetic.
+	if err := os.Setenv("NVPAIR_TAILNET_DISCOVERY", "0"); err != nil {
+		log.Fatalf("disable tailnet discovery for tests: %v", err)
+	}
 	tmpDir, err := os.MkdirTemp("", "nvpair-tests-*")
 	if err != nil {
 		log.Fatalf("failed to create temp dir: %v", err)

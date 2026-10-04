@@ -648,9 +648,71 @@ its address.
 
 Some networks block or filter multicast, so discovery is not the only path in.
 `nvpair-manual-nodes` takes an address you enter directly and probes it on a
-fixed interval, and a manual node that answers is folded into the same directory
-as a discovered one. It is initially keyed by the address you typed, and re-keyed
-to the peer's real UUID as soon as that node reports it.
+fixed interval, and a manual node that answers is folded into the broker's node
+list, which drives its card and telemetry. It is initially keyed by the address
+you typed, and re-keyed to the peer's real UUID as soon as that node reports it.
+A manual entry does not reach the directory the cluster channels dial peers
+from (engine status, the Jobs list, error sync, roster reconcile), so it cannot
+stand in for a cluster member; members on other networks are found as described
+next.
+
+### Members on Other Networks
+
+Multicast stays on the local link, and overlay networks such as Tailscale do not
+carry it. A member that shares only a tailnet with this node, such as a laptop
+away from home, is never announced to it. Without help it drops out of the
+cluster view and out of every channel that dials peers from the directory.
+
+When a Tailscale client is installed, the scanner asks it every 30 seconds which
+devices on the tailnet are online and at which overlay address (the 100.64/10 range).
+Devices shared in from another tailnet and devices whose key has expired are
+skipped. For each remaining device it opens a TLS connection to the
+engine-manager port, presents this node's certificate, and accepts the other
+side only if that side's certificate is pinned, byte for byte, as a cluster
+member. That handshake is the
+only thing that files an address under a member. Tailnet hostnames, DNS names,
+and node-information answers are never trusted. Members proven recently are
+asked first and published as soon as they answer. A device that answers with a
+certificate that is not a member's is not asked again for ten minutes, or until
+the cluster's pins change; one that does not answer at all is asked again after
+30 seconds, then at doubling intervals, so a member whose first handshake times
+out is still found quickly.
+
+A member found this way joins the same directory as one heard over multicast:
+
+- Where multicast still reaches it, its own announcement stands and the overlay
+  address takes the last place in its address list, so peers keep preferring
+  the addresses it ranked itself while they answer.
+- Once multicast has missed it for three scans, it is listed at its overlay
+  address alone, under the name from its last announcement and the fixed
+  cluster service ports. Nothing from an announcement, which is unauthenticated,
+  decides where a proven member is dialed: its old LAN addresses are dropped
+  rather than dialed on whatever network this node is on now, and its inference
+  proxy ports, which a node advertises only while the engine behind them is
+  healthy, are left out.
+- It is proven again on every refresh, and that proof is its liveness: a member
+  that stops answering leaves through the ordinary eviction path once its last
+  proof is a minute old, unless the local proxies are still receiving inference
+  from it (a node saturated by inference is the one least able to finish a
+  handshake).
+
+Every node runs the scanner, so the path works in both directions: a member at
+home finds an away laptop the same way, and the Jobs list and error sync, which
+each origin pushes to its peers, reach the laptop too. A member still running a
+scanner without this feature is found by upgraded nodes, but cannot find an away
+node itself, so the jobs and errors it originates do not reach that node until
+it is upgraded.
+
+Peers that settled on a member's overlay address while away keep using it at
+home for as long as it answers; it is the same machine over an encrypted path,
+and they move back to the LAN address once the overlay one stops answering. Away
+from home every peer's telemetry is fetched over the tailnet, a few kilobytes
+per second per member; on a metered link that adds up over a day.
+
+This adds reach, not trust: every cluster channel still pins the peer's
+certificate when it connects. Set `NVPAIR_TAILNET_DISCOVERY=0` in the
+environment PAIR starts with to turn it off; the environment variable is the
+only switch.
 
 ## Trust Boundaries
 

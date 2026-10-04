@@ -148,6 +148,29 @@ func TestAskRememberedForgetsAnAddressNobodyAnswersAt(t *testing.T) {
 	}
 }
 
+// TestAskRememberedIgnoresAnAddressTheNodeNoLongerLists: a laptop that left home
+// stops publishing its LAN address; on the network this node is on now that
+// address may belong to some other machine, so it is not asked at all.
+func TestAskRememberedIgnoresAnAddressTheNodeNoLongerLists(t *testing.T) {
+	net := newAnswering("192.168.240.5", testOverlay(2))
+	mem := &hostMemory{}
+	askRemembered(mem, testKey(), []string{"192.168.240.5", testOverlay(2)}, net.ask)
+	net.asked = nil
+
+	host, _, ok := askRemembered(mem, testKey(), []string{testOverlay(2)}, net.ask)
+	if !ok || host != testOverlay(2) {
+		t.Fatalf("askRemembered = %q,%v, want the address the node lists now", host, ok)
+	}
+	for _, a := range net.askedAddresses() {
+		if a == "192.168.240.5" {
+			t.Fatal("asked a remembered address the node no longer publishes")
+		}
+	}
+	if got := mem.get(testKey()); got != testOverlay(2) {
+		t.Errorf("remembers %q, want the listed address", got)
+	}
+}
+
 // TestAskTogetherPrefersRankOverArrivalOrder: the node's ranking decides, not the
 // stopwatch. Taking the fastest responder would let two working addresses swap
 // places between sweeps on nothing but timing noise.

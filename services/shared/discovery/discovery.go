@@ -158,6 +158,7 @@ type options struct {
 	selfInstance  string
 	keyFunc       func(Node) string
 	warnCollision bool
+	supplement    func(seen map[string]Node) map[string]Node
 }
 
 // Option configures a Browser.
@@ -195,6 +196,25 @@ func WithSelfFilter(selfInstance string) Option {
 // "" to fall back to the instance name for that node. cluster-manager keys by
 // uuid= so two hosts sharing an instance name but distinct UUIDs don't collide.
 func WithKeyFunc(fn func(Node) string) Option { return func(o *options) { o.keyFunc = fn } }
+
+// WithSupplement lets a consumer extend each scan's multicast results with nodes
+// it found some other way — a unicast source for links mDNS cannot cross, such
+// as a tailnet — before they are reconciled. fn receives the scan's seen set
+// (keyed like the node map) and returns the set to reconcile: it may add nodes,
+// adjust the ones mDNS reported, or pass the set through. The browser re-keys
+// whatever comes back, so a supplied node lands under the same key its own mDNS
+// record would. Supplied nodes then go through exactly the same state machine as
+// multicast ones: discovered/updated events, miss counting, the liveness probe
+// and eviction once fn stops supplying them.
+//
+// emptyScanGrace still reads the multicast result alone. It exists to tell this
+// browser's own receive failure apart from news about the fleet, and nodes fn
+// supplies say nothing about whether multicast is being heard — so a scan whose
+// multicast came back empty is excused for the nodes only multicast knows about,
+// while the supplied ones are still reconciled as seen.
+func WithSupplement(fn func(seen map[string]Node) map[string]Node) Option {
+	return func(o *options) { o.supplement = fn }
+}
 
 // Browser maintains a reconciled set of discovered nodes for one service type.
 type Browser struct {
@@ -365,9 +385,25 @@ func (b *Browser) Run(ctx context.Context, events chan<- Event) {
 // pull-model entry point (workload-manager's PeerSource), an alternative to Run.
 func (b *Browser) Poll(ctx context.Context) []Node {
 	if ctx.Err() == nil {
-		b.reconcile(b.browseFunc(ctx))
+		b.reconcileScan(b.scan(ctx))
 	}
 	return b.Nodes()
+}
+
+// scan runs one browse and applies the supplement, reporting whether the
+// multicast part came back empty (see WithSupplement on emptyScanGrace).
+func (b *Browser) scan(ctx context.Context) (map[string]Node, bool) {
+	seen := b.browseFunc(ctx)
+	multicastEmpty := len(seen) == 0
+	if b.opt.supplement == nil {
+		return seen, multicastEmpty
+	}
+	supplied := b.opt.supplement(seen)
+	rekeyed := make(map[string]Node, len(supplied))
+	for _, n := range supplied {
+		rekeyed[b.key(n)] = n
+	}
+	return rekeyed, multicastEmpty
 }
 
 // scanEmit runs one browse+reconcile and, when events is non-nil, forwards the
@@ -376,7 +412,7 @@ func (b *Browser) scanEmit(ctx context.Context, events chan<- Event) {
 	if ctx.Err() != nil {
 		return
 	}
-	pending := b.reconcile(b.browseFunc(ctx))
+	pending := b.reconcileScan(b.scan(ctx))
 	if events == nil {
 		return
 	}
@@ -393,6 +429,12 @@ func (b *Browser) scanEmit(ctx context.Context, events chan<- Event) {
 // resulting events. With a liveness probe configured, threshold-missed nodes are
 // probed outside the lock before eviction.
 func (b *Browser) reconcile(seen map[string]Node) []Event {
+	return b.reconcileScan(seen, len(seen) == 0)
+}
+
+// reconcileScan is reconcile with the multicast-empty signal passed separately,
+// because a supplemented seen set can be non-empty while multicast heard nothing.
+func (b *Browser) reconcileScan(seen map[string]Node, multicastEmpty bool) []Event {
 	b.mu.Lock()
 	var pending []Event
 
@@ -422,8 +464,10 @@ func (b *Browser) reconcile(seen map[string]Node) []Event {
 
 	// Losing several independent nodes in one scan is treated as a failure of this
 	// browser before it is treated as news about the fleet — see emptyScanGrace.
-	// Bounded, so a fleet that really has gone still ages out.
-	if len(seen) == 0 && len(b.nodes) > 1 {
+	// Bounded, so a fleet that really has gone still ages out. The test is on the
+	// multicast result: supplied nodes were already folded in above and say
+	// nothing about whether this browser is hearing multicast.
+	if multicastEmpty && len(b.nodes) > 1 {
 		b.emptyScans++
 		if b.emptyScans <= emptyScanGrace {
 			if b.emptyScans == 1 {

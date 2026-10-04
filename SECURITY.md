@@ -84,6 +84,11 @@ Wi-Fi, shared office network, compromised router, and hostile local process as
 potentially adversarial. Network segmentation and host firewall rules remain
 the operator's responsibility.
 
+An overlay network extends that boundary. When the node scanner finds members
+over a Tailscale tailnet, every device the tailnet's access rules admit can
+reach PAIR's ports, including the plain node-information endpoint. Restrict TCP
+14318–14323 in the tailnet policy to the machines that run PAIR.
+
 “Local-first” describes the intended topology. It does not prove that no data
 leaves the machine or LAN. Inference engines, model catalogs, update systems,
 applications, and user configuration may contact external services.
