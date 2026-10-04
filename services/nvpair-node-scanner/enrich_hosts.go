@@ -5,6 +5,7 @@ package main
 
 import (
 	"log/slog"
+	"slices"
 	"sync"
 
 	"nvpair-shared/noderec"
@@ -72,13 +73,20 @@ func (m *hostMemory) forget(key hostKey) {
 // different machine, which is not an answer for this one.
 func askRemembered[T any](mem *hostMemory, key hostKey, hosts []string, ask func(host string) (T, bool)) (string, T, bool) {
 	if remembered := mem.get(key); remembered != "" {
-		if value, ok := ask(remembered); ok {
-			return remembered, value, true
+		// Only while the node still lists it: an address the node no longer
+		// publishes (a laptop that left home drops its LAN address) may now belong
+		// to some other machine on whatever network this node is on.
+		if !slices.Contains(hosts, remembered) {
+			mem.forget(key)
+		} else {
+			if value, ok := ask(remembered); ok {
+				return remembered, value, true
+			}
+			mem.forget(key)
+			slog.Debug("enrichment: the remembered address stopped answering; trying the rest of the list",
+				"host_uuid", key.hostUUID, "service", key.service, "address", remembered)
+			hosts = withoutHost(hosts, remembered)
 		}
-		mem.forget(key)
-		slog.Debug("enrichment: the remembered address stopped answering; trying the rest of the list",
-			"host_uuid", key.hostUUID, "service", key.service, "address", remembered)
-		hosts = withoutHost(hosts, remembered)
 	}
 
 	host, value, ok := askTogether(hosts, ask)

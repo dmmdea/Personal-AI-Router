@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"nvpair-shared/netpick"
 	"nvpair-shared/noderec"
 )
 
@@ -31,7 +30,7 @@ import (
 // nodeid.Resolve), so a record without it can't be keyed by a stable identity.
 // We skip it (and warn) rather than key it by the mutable, non-unique hostname —
 // node identity is the UUID everywhere, with no hostname fallback.
-func toDirectoryNode(raw RawNode, trusted bool) (noderec.DirectoryNode, bool) {
+func toDirectoryNode(raw RawNode, trusted bool, overlay ...string) (noderec.DirectoryNode, bool) {
 	rec := noderec.ParseTXT(raw.TXT)
 	if rec.HostUUID == "" {
 		slog.Warn("skipping _nvpair-node record without uuid=; cannot key it by a stable identity",
@@ -39,8 +38,10 @@ func toDirectoryNode(raw RawNode, trusted bool) (noderec.DirectoryNode, bool) {
 		return noderec.DirectoryNode{}, false
 	}
 	// netpick.Candidates unions the record's own ip= / ips= with whatever the
-	// browse resolved, preserving the node's order and appending the rest.
-	ips := netpick.Candidates(raw.TXT, raw.Addresses)
+	// browse resolved, preserving the node's order and appending the rest. An
+	// overlay address the tailnet locator proved for this node takes the last
+	// slot inside the cap every reader applies (see tailnetCandidates).
+	ips := tailnetCandidates(raw.TXT, raw.Addresses, overlay)
 	var ip string
 	if len(ips) > 0 {
 		ip = ips[0]
