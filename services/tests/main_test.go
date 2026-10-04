@@ -149,6 +149,24 @@ func TestMain(m *testing.M) {
 		log.Fatalf("build nvpair-job-scheduler: %v", err)
 	}
 
+	// Every binary these tests start resolves its data directory through
+	// nvpair-shared/appdir, which on a developer machine is the live install's:
+	// its cluster identity and pins, and the Jobs history the desktop shows.
+	// Point every base appdir reads at a scratch directory; a test that needs its
+	// own still overrides it per process. Set after the builds, because the Go
+	// build and module caches resolve from the same variables.
+	userData := filepath.Join(tmpDir, "userdata")
+	if err := os.MkdirAll(userData, 0o700); err != nil {
+		os.RemoveAll(tmpDir)
+		log.Fatalf("create scratch user data dir: %v", err)
+	}
+	for _, key := range []string{"LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME", "HOME"} {
+		if err := os.Setenv(key, userData); err != nil {
+			os.RemoveAll(tmpDir)
+			log.Fatalf("point %s at the scratch user data dir: %v", key, err)
+		}
+	}
+
 	code := m.Run()
 	os.RemoveAll(tmpDir)
 	os.Exit(code)
