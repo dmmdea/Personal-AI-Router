@@ -26,6 +26,7 @@ import (
 	"nvpair-shared/nodeid"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
+	"nvpair-shared/tailnet"
 )
 
 // daemon is the promoted node-scanner: it advertises this
@@ -144,6 +145,11 @@ type daemon struct {
 	// address works from somewhere other than this machine.
 	observedMu sync.Mutex
 	observed   map[string]bool
+
+	// tailnet finds cluster members over the local Tailscale client when mDNS
+	// cannot reach them (see tailnet_locator.go). nil when the operator turned
+	// it off; every use is nil-safe.
+	tailnet *tailnetLocator
 }
 
 // nodeInfoFetchTimeout bounds each node-info enrichment HTTP(S) GET, shared by
@@ -378,10 +384,19 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	// holding distinct UUIDs must not collapse into one directory entry (matching
 	// cluster-manager's browser). Self re-stamps are handled separately in
 	// reloadIdentity, which moves this node's own directory entry to the new uuid.
-	d.browser = NewDiscovery(noderec.ServiceType, noderec.Domain,
+	opts := []DiscoveryOption{
 		WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
 		WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
-	)
+	}
+	// Members reachable only over a tailnet join each scan through the locator,
+	// so they enter the directory — and every channel fed from it — the same way
+	// a multicast sighting does.
+	if !tailnetDisabled() {
+		d.tailnet = newTailnetLocator(mesh, func() string { return d.reg.record().HostUUID })
+		merge := newTailnetMerge(d.tailnet.current)
+		opts = append(opts, WithSupplement(merge.supplement))
+	}
+	d.browser = NewDiscovery(noderec.ServiceType, noderec.Domain, opts...)
 	if resp, err := mdns.NewResponder(instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, reg.txt()); err != nil {
 		slog.Warn("mDNS advertising disabled for _nvpair-node", "err", err)
 	} else {
@@ -411,6 +426,15 @@ func (d *daemon) run(ctx context.Context) {
 	// makes it present the instant we start and immune to self-multicast loss.
 	d.publishSelf()
 
+	if d.tailnet != nil {
+		go d.tailnet.run(ctx)
+		// watchAddress pokes the locator on network changes, but it only runs
+		// alongside the mDNS responder; without one the locator still needs to
+		// hear that the network moved.
+		if d.responder == nil {
+			go d.watchNetworkForTailnet(ctx)
+		}
+	}
 	events := make(chan DiscoveryEvent, 32)
 	go d.browser.Run(ctx, events)
 	// Converge peer model inventories independently of mDNS change events: the
@@ -452,7 +476,7 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 		d.mesh.Refresh()
 		trusted = d.mesh.HasPin(cu)
 	}
-	node, ok := toDirectoryNode(ev.Node, trusted)
+	node, ok := toDirectoryNode(ev.Node, trusted, d.tailnet.addressesFor(UUIDFromTXT(ev.Node.TXT))...)
 	if !ok {
 		// Record without a uuid= — toDirectoryNode already warned. Nothing to
 		// store, and a removed event for it is a no-op since it was never added.
@@ -499,6 +523,12 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 func (d *daemon) supersedingUpsert(node noderec.DirectoryNode) {
 	var proven []noderec.DirectoryNode
 	for _, old := range d.dir.supersedeCandidates(node, d.reg.record().HostUUID) {
+		// A member that just proved itself with its pinned certificate is not a
+		// ghost, whatever an unauthenticated record sharing its name claims, and
+		// whether or not its last-published LAN addresses answer from here.
+		if d.tailnet.vouches(old.HostUUID) {
+			continue
+		}
 		if d.identityReplaced(old, node) {
 			proven = append(proven, old)
 		}
@@ -588,6 +618,8 @@ func (d *daemon) reloadTrust() {
 	// identity before annotating peers against it.
 	d.reconcileIdentity()
 	d.reconcileTrust()
+	// A tailnet device the locator set aside as "not a member" may be one now.
+	d.tailnet.pokeTrust()
 }
 
 // reconcileIdentity re-advertises this node when live membership no longer
@@ -768,14 +800,22 @@ func (d *daemon) peerAddresses() []string {
 		self = d.reg.record().HostUUID
 	}
 	var out []string
+	// A member's overlay address is reached through the tailnet interface, never
+	// on the link of a physical one; on a carrier-NAT Wi-Fi that hands out
+	// 100.64/10 it would otherwise make the hostile NIC look like it faces peers.
+	add := func(ip string) {
+		if ip != "" && !d.tailnet.provenAddress(ip) {
+			out = append(out, ip)
+		}
+	}
 	for _, n := range d.dir.snapshot("") {
 		if n.HostUUID == self {
 			continue
 		}
-		if n.IP != "" {
-			out = append(out, n.IP)
+		add(n.IP)
+		for _, ip := range n.IPs {
+			add(ip)
 		}
-		out = append(out, n.IPs...)
 	}
 	return out
 }
@@ -912,6 +952,23 @@ func (d *daemon) watchAddress(ctx context.Context) {
 	}
 	for range mon.Subscribe() {
 		d.reloadIdentity()
+		// A network change can make a member reachable over the tailnet (or stop
+		// it being reachable over the LAN); re-read the tailnet now rather than
+		// at the next timer tick.
+		d.tailnet.poke()
+	}
+}
+
+// watchNetworkForTailnet pokes the tailnet locator on network changes when no
+// mDNS responder (and so no watchAddress) is running.
+func (d *daemon) watchNetworkForTailnet(ctx context.Context) {
+	mon, err := netmon.Watch(ctx)
+	if err != nil {
+		slog.Debug("network monitor unavailable; the tailnet locator keeps its timer", "err", err)
+		return
+	}
+	for range mon.Subscribe() {
+		d.tailnet.poke()
 	}
 }
 
@@ -990,7 +1047,23 @@ const loopbackHost = "127.0.0.1"
 // nothing to probe and evicts normally.
 func (d *daemon) reachable(n RawNode) bool {
 	rec := noderec.ParseTXT(n.TXT)
-	candidates := netpick.Candidates(n.TXT, n.Addresses)
+	// A record the tailnet locator built is alive exactly while the locator's
+	// pinned handshake vouches for the member. The probe below would accept a
+	// plain node-info answer naming the member's UUID, which anything holding
+	// the address can give; the record must not outlive the proof that made it.
+	if isOverlayRecord(n) {
+		if d.tailnet.vouches(rec.HostUUID) {
+			return true
+		}
+		// A member saturated by inference is the one least able to finish a
+		// handshake and the one most certainly alive; the bytes the local
+		// proxies receive from its engine (over pinned mTLS) vouch for it too.
+		since, ok := d.activitySince(rec.HostUUID)
+		return ok && since < activityFreshness
+	}
+	// A member the tailnet locator proved keeps its overlay address inside the
+	// candidate cap, so a node whose LAN went away is still found here.
+	candidates := tailnetCandidates(n.TXT, n.Addresses, d.tailnet.addressesFor(rec.HostUUID))
 	if len(candidates) == 0 {
 		return false
 	}
@@ -1168,7 +1241,8 @@ func (d *daemon) enrichInfoAt(node *noderec.DirectoryNode, host string) {
 // enrichInfoCandidates is enrichInfoAt with address failover. A raw TCP accept
 // is not enough here: identically configured direct-connect links can reuse an
 // address on different machines, so the response's host UUID is checked before
-// the candidate is accepted. Older peers that omit hostUuid remain compatible.
+// the candidate is accepted. Older peers that omit hostUuid remain compatible on
+// LAN addresses; at an overlay address the answer must name the node.
 //
 // Which address is asked, and in what order, is askRemembered's business: the one
 // that answered last sweep by itself, and the rest together only if it stopped.
@@ -1185,6 +1259,14 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 		if candidate.HostUUID != "" && node.HostUUID != "" && candidate.HostUUID != node.HostUUID {
 			slog.Debug("node-info candidate answered for a different host; trying next",
 				"expected_host_uuid", node.HostUUID, "reported_host_uuid", candidate.HostUUID, "ip", host)
+			return NodeInfoResponse{}, false
+		}
+		// An overlay address must name the node it is asked about. With the
+		// tailnet down, a dial to 100.64/10 leaves through the default route of
+		// whatever network this node is on, where any machine may answer.
+		if tailnet.IsOverlayIPv4(host) && (candidate.HostUUID == "" || candidate.HostUUID != node.HostUUID) {
+			slog.Debug("node-info at an overlay address did not name the expected host; trying next",
+				"expected_host_uuid", node.HostUUID, "ip", host)
 			return NodeInfoResponse{}, false
 		}
 		return candidate, true
