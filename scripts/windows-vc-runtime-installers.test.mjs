@@ -44,7 +44,7 @@ test('desktop packaging verifies and installs the staged runtime', () => {
     assert.match(
         installer,
         // The fork registers its Windows-only nvpair-sensors service last.
-        /!macro customInstall\s+!insertmacro pairAssertPayloadInstalled\s+!insertmacro pairInstallVcRuntime\s+!insertmacro pairAddFirewallRules\s+(?:!insertmacro pairInstallSensorsService\s+)?!macroend/
+        /!macro customInstall\s+!insertmacro pairAssertPayloadInstalled\s+!insertmacro pairInstallVcRuntime\s+!insertmacro pairAddFirewallRules\s+!insertmacro pairInstallSensorsService\s+!macroend/
     )
     assert.match(installer, /Delete "\$INSTDIR\\resources\\installer-tools\\VC_redist\.x64\.exe"/)
     assertRuntimeExitHandling(installer, '$8')
