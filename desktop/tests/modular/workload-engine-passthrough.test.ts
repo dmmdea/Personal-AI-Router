@@ -13,14 +13,49 @@ describe('workload engine passthrough', () => {
     it('keeps a third-party engine identifier and still maps the proxy engines', () => {
         const parsed = parseWorkloadsInitial({
             workloads: [
-                { id: '1', engine: 'llamacpp', state: 'running', model: 'qwen3.5-9b-agent', originatedFrom: 'u1', createdAt: 1 },
-                { id: '5', engine: 'comfyui', state: 'failed', model: 'wan2.2', originatedFrom: 'u1', createdAt: 5 },
-                { id: '2', engine: 'vllm', state: 'completed', model: 'qwen38-27b', originatedFrom: 'u1', createdAt: 2 },
-                { id: '3', engine: 'lmstudio', state: 'queued', model: 'm', originatedFrom: 'u1', createdAt: 3 },
-                { id: '4', engine: 'ollama', state: 'queued', model: 'm', originatedFrom: 'u1', createdAt: 4 }
+                {
+                    id: '1',
+                    engine: 'llamacpp',
+                    state: 'running',
+                    model: 'qwen3.5-9b-agent',
+                    originatedFrom: 'u1',
+                    createdAt: 1
+                },
+                {
+                    id: '5',
+                    engine: 'comfyui',
+                    state: 'failed',
+                    model: 'wan2.2',
+                    originatedFrom: 'u1',
+                    createdAt: 5
+                },
+                {
+                    id: '2',
+                    engine: 'vllm',
+                    state: 'completed',
+                    model: 'qwen38-27b',
+                    originatedFrom: 'u1',
+                    createdAt: 2
+                },
+                {
+                    id: '3',
+                    engine: 'lmstudio',
+                    state: 'queued',
+                    model: 'm',
+                    originatedFrom: 'u1',
+                    createdAt: 3
+                },
+                {
+                    id: '4',
+                    engine: 'ollama',
+                    state: 'queued',
+                    model: 'm',
+                    originatedFrom: 'u1',
+                    createdAt: 4
+                }
             ]
         })
-        expect(parsed.map((w) => [w.id, w.engine])).toEqual([
+        expect(parsed.map(w => [w.id, w.engine])).toEqual([
             ['1', 'llama-cpp'],
             ['5', 'comfyui'],
             ['2', 'vllm'],
@@ -31,7 +66,9 @@ describe('workload engine passthrough', () => {
 
     it('still drops a workload with no engine at all', () => {
         const parsed = parseWorkloadsInitial({
-            workloads: [{ id: '1', state: 'running', model: 'm', originatedFrom: 'u1', createdAt: 1 }]
+            workloads: [
+                { id: '1', state: 'running', model: 'm', originatedFrom: 'u1', createdAt: 1 }
+            ]
         })
         expect(parsed).toEqual([])
     })
