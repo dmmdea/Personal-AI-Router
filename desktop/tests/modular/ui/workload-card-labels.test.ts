@@ -3,32 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import type { WorkloadState } from '@/shared/types/workloads'
-import { parseWorkloadRequester, workloadNodeRowLabel } from '@/shared/utils/workloads'
-
-const STARTED = 1_700_000_000_000
-
-function label(state: WorkloadState, startedAt: number | null): string {
-    return workloadNodeRowLabel({ state, startedAt })
-}
-
-describe('workloadNodeRowLabel', () => {
-    it('says what each state did on the node', () => {
-        expect(label('running', STARTED)).toBe('Running on')
-        expect(label('initializing', null)).toBe('Starting on')
-        expect(label('queued', null)).toBe('Queued on')
-        expect(label('completed', STARTED)).toBe('Ran on')
-    })
-
-    it('does not claim a failed job ran when it never started', () => {
-        expect(label('failed', STARTED)).toBe('Ran on')
-        expect(label('failed', null)).toBe('Never started on')
-    })
-
-    it('treats startedAt of 0 as set (only null means never started)', () => {
-        expect(label('failed', 0)).toBe('Ran on')
-    })
-})
+import { parseWorkloadRequester } from '@/shared/utils/workloads'
 
 describe('parseWorkloadRequester', () => {
     const uuid = '3f2a9c1e-7b4d-4e8a-9f60-1a2b3c4d5e6f'

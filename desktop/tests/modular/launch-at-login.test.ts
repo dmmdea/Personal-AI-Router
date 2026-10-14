@@ -73,8 +73,7 @@ describe('startup preferences in ui-config', () => {
         initPlatform({
             getUserData: () => tmp.dir,
             getTemp: () => tmp.dir,
-            getResourcesPath: () => process.cwd(),
-            getAppName: () => 'Personal AI Router'
+            getResourcesPath: () => process.cwd()
         })
     })
 

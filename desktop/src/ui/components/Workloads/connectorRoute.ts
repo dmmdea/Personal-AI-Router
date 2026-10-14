@@ -20,7 +20,7 @@ export interface Rect {
     bottom: number
 }
 
-export interface Point {
+interface Point {
     x: number
     y: number
 }
@@ -56,8 +56,14 @@ export function roundedPath(points: readonly Point[], radius = CORNER_RADIUS): s
         const inLen = Math.hypot(cur.x - prev.x, cur.y - prev.y)
         const outLen = Math.hypot(next.x - cur.x, next.y - cur.y)
         const r = Math.min(radius, inLen / 2, outLen / 2)
-        const a = { x: cur.x - ((cur.x - prev.x) / inLen) * r, y: cur.y - ((cur.y - prev.y) / inLen) * r }
-        const b = { x: cur.x + ((next.x - cur.x) / outLen) * r, y: cur.y + ((next.y - cur.y) / outLen) * r }
+        const a = {
+            x: cur.x - ((cur.x - prev.x) / inLen) * r,
+            y: cur.y - ((cur.y - prev.y) / inLen) * r
+        }
+        const b = {
+            x: cur.x + ((next.x - cur.x) / outLen) * r,
+            y: cur.y + ((next.y - cur.y) / outLen) * r
+        }
         d += ` L ${a.x},${a.y} Q ${cur.x},${cur.y} ${b.x},${b.y}`
     }
     const last = pts[pts.length - 1]

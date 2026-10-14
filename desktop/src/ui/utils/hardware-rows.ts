@@ -28,7 +28,7 @@ import { MEMORY_POOL_UNIFIED } from '@/shared/constants/hardware'
 import { formatBytes } from '@/ui/utils/formatters'
 
 /** The minimum shape both the legend and the performance panel share. */
-export interface HardwareRow {
+interface HardwareRow {
     /** "" or undefined for a GPU, "npu" for an accelerator. */
     kind?: string
     /** Total VRAM in bytes; 0 for a device that has none. */
