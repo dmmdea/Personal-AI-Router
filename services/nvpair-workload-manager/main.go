@@ -84,13 +84,12 @@ func main() {
 	}()
 
 	codec := NewCodec(transport)
-	ingressAddr := resolveLocalIngressAddr(*localIngress, *clusterDir)
-	if ingressAddr != "" {
-		log.Printf("local workload ingress enabled on %s", ingressAddr)
-	}
-	mgr, err := NewManager(codec, *port, selfUUID, *clusterDir, ingressAddr)
-	if err != nil {
-		log.Fatalf("workload-manager: %v", err)
+	mgr := NewManager(codec, *port, selfUUID, *clusterDir)
+	if addr := resolveLocalIngressAddr(*localIngress, *clusterDir); addr != "" {
+		if err := mgr.EnableLocalIngress(addr); err != nil {
+			log.Fatalf("workload-manager: %v", err)
+		}
+		log.Printf("local workload ingress enabled on %s", addr)
 	}
 
 	if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {

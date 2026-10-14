@@ -39,6 +39,7 @@ component browsing the network itself.
 | `--port <n>` | `14320` | Inter-node port to listen on and advertise |
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
 | `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt` / `node.key` + `trusted/`) supplying the identity and pins the inter-node mTLS channel requires. Without it the node has no cluster identity and exchanges no inter-node traffic |
+| `--local-ingress <host:port>` | _(off)_ | Loopback address of the optional [local ingress](#local-ingress-optional-loopback-only); a non-loopback address is refused. Without the flag, `<appdir>/workload-ingress.json` can enable it |
 | `--log-level <level>` | `info` | One of `error` / `warn` / `info` / `debug` |
 | `--version` | | Print version and exit |
 
@@ -75,40 +76,78 @@ work for the node that runs them. The ingress is **off by default** and
 - `POST /v1/workloads/events` takes the same JSON-RPC 2.0 frames as the
   inter-node port: `workload:submitted` / `workload:started` /
   `workload:completed` / `workload:errored` with `params.workloadInfo`, and
-  `workloads:remove` with `params.workloadId`. A broker that cannot be written
-  is `500`.
-- The request is checked before its body is read, in this order: a method other
-  than `POST` is `405`; a `Host` that is not a loopback name or address
-  (`localhost`, `127.0.0.0/8`, `::1`) carrying the ingress port is `421`, which
-  is what a DNS-rebinding page sends; any `Origin` header is `403`, because a
-  browser adds one to a cross-origin request and a producer does not; a
-  `Content-Type` other than `application/json` (parameters such as
-  `charset=utf-8` are fine) is `415`; a body over 1 MiB is `413`.
-- The frame is checked as an untrusted producer's, and a mistake is `400`:
-  - `originatedFrom` (inside `params.workloadInfo` for a lifecycle frame, at the
-    top level of `params` for `workloads:remove`) may be absent, `null`, empty or
-    this node's UUID, and is stamped with this node's UUID when empty. Any other
-    value is refused: the ingress reports workloads that run on this node.
-  - `workloadInfo.state` is one of `initializing`, `queued`, `running`,
-    `completed` or `failed`.
-  - `workloadInfo.id` and `workloadId` are at most 256 bytes.
-  - Field names are spelled exactly as documented. The JSON decoders match names
-    without regard to case, so a name such as `originatedfrom` or `Id`, or two
-    keys that differ only by case, is refused.
-  - `resync`, in any spelling, is refused: it is the peers' own re-assertion
-    marker, and a frame carrying it would bypass their dedup.
-- An accepted frame is treated as **local origin**: tracked for re-sync,
-  broadcast to pinned peers, and emitted to the broker as `workloads:upsert` /
-  `workloads:remove` — the same translation a peer-origin event receives, so
-  the local store, the Jobs list, the persisted history and the scheduler all
-  update.
+  `workloads:remove` with `params.workloadId`. `originatedFrom` must be empty
+  (it is then stamped with this node's UUID) or this node's UUID; any other
+  value is `400`, because the ingress reports only workloads that run here.
+  `state` must be one of `queued`, `running`, `completed`, `failed` or
+  `cancelled`, and a workload id (`workloadInfo.id`, or `workloadId` on a
+  removal) is at most 256 bytes.
+- Field names must be spelt exactly as documented, and once. JSON decoders
+  match names without regard to case, so a variant such as `originatedfrom` or
+  `WorkloadInfo`, or two names that differ only in case, is `400` rather than
+  being read as the field. A `resync` name in any spelling is `400` too: it is
+  the peers' own marker for a re-assertion, and a frame carrying it would
+  bypass their dedup.
+- A web page in the user's browser can reach loopback, so a request is refused
+  before its body is read when it carries an `Origin` header (`403`), when its
+  `Host` is not `localhost`, a `127.0.0.0/8` address or `::1` with the ingress
+  port (`421`), or when its `Content-Type` is not `application/json` (`415`). A
+  body over 1 MiB is `413`. Other producer mistakes are `400`, any method other
+  than `POST` is `405`, and a broker that cannot be written is `500`. Request
+  header, read and idle timeouts are set. There is no write timeout: it would
+  also cover the wait for the broker, and cut off a producer whose frame was
+  in fact accepted.
+- A frame may carry `workloadInfo.seq`, the producer's event counter for that
+  workload, from 1. It is part of the key peers deduplicate on, so a producer
+  should stamp it: without it, peers drop an event that repeats a `state` and
+  `scheduledOn` the workload already had.
+- `cancelled` is a valid `state`, carried on `workload:errored`.
+- An accepted frame is treated as **local origin**. It is first emitted to the
+  broker as `workloads:upsert` / `workloads:remove` — the same translation a
+  peer-origin event receives, so the local store, the Jobs list, the persisted
+  history and the scheduler all update — and only then tracked for re-sync and
+  queued for broadcast to pinned peers. If the broker write fails the frame is
+  neither tracked nor queued, so the producer can retry it.
+- `200` means the frame was written to the broker and queued for peers. The
+  peer side is best-effort like every broadcast: a frame is dropped with a
+  warning when the outbound queue is full, and a dropped removal is not
+  re-synced.
+- A workload removed through the ingress is remembered for a minute, up to
+  4096 removals (past that the oldest is forgotten first). In that window a
+  replay of the broker's store (sent to a restarted worker) that carries the
+  same workload is ignored instead of tracking it again; a new ingress frame
+  for it clears the memory.
+- Choose ingress ids that cannot collide with the ids of the built-in engine
+  proxies, which count from 1: a removal matches on `(originatedFrom, id)`, so
+  it would also drop a proxy workload with the same id, and that id is then
+  ignored from the broker for the minute above.
+- The ingress writes to the broker while holding a lock, so a broker that stops
+  reading its pipe blocks ingress requests, as it blocks every other path that
+  writes to the broker.
+- Ordering: for one workload, the broker and the peers see the ingress frames in
+  the same order. That holds among ingress frames only. A `workloads:remove`
+  the broker itself sends for the same workload (a delete from the Jobs list)
+  while an ingress update for it is being written can reach the peers before
+  that update; the producer's next frame or its removal makes them converge.
+
+Example, a producer reporting one job that has started:
+
+```bash
+curl -X POST http://127.0.0.1:14324/v1/workloads/events \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{
+        "id":"job-17","model":"my-model","engine":"my-engine","runId":"9f3c1a7b",
+        "seq":1,"state":"running","createdAt":1716998400000,
+        "startedAt":1716998401000,"completedAt":null,"error":null,"requesterId":null}}}'
+```
 
 The trust boundary is the one the proxies' plaintext loopback personality
 already documents: a process that can reach this machine's loopback may report
-work, just as it may already submit it. A web page in the user's browser is not
-such a process: the Host, Origin and content-type rules above refuse it before
-its body is read. Prompts, messages and response bodies are not part of the
-frame and must never be added.
+work, just as it may already submit it. The frame carries workload metadata
+only, and a producer must send nothing else: the ingress checks the fields it
+knows, but passes any other field inside `workloadInfo` (and `params`) through
+unchanged to the peers and keeps it in the re-sync set. Prompts,
+messages and response bodies must never be put in a frame.
 
 ## Lifecycle events
 
@@ -132,13 +171,14 @@ Defined in [`workload.go`](workload.go):
 | --- | --- |
 | `id` | Stable workload identifier |
 | `model`, `engine` | What was requested and by which engine |
-| `runId` | Optional grouping key |
-| `state` | `initializing`, `queued`, `running`, `completed`, or `failed` |
+| `runId` | Producing process's nonce, minted at proxy startup. Part of the dedup key: `id` is a per-facade counter that every engine facade starts at 1 and that resets on restart, so `runId` keeps a reused id from colliding with an older workload |
+| `state` | `queued`, `running`, `completed`, `failed`, or `cancelled` |
 | `originatedFrom` | Node the request entered the cluster on |
 | `scheduledOn` | Node it was routed to; absent until a target is chosen |
 | `createdAt`, `startedAt`, `completedAt` | Epoch milliseconds; the last two are nullable |
 | `error` | Normalized failure text, nullable |
 | `requesterId` | Optional client attribution, nullable |
+| `seq` | Producer's event counter, from 1. Part of the dedup key, so a workload that returns to a placement it already had is not mistaken for a redelivery |
 
 Optional and nullable fields use pointers so a peer's payload round-trips without
 inventing zero values.

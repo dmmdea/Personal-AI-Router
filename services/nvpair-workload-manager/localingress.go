@@ -33,15 +33,25 @@ import (
 // the desktop application. Absent, empty or malformed means off.
 const localIngressConfigFile = "workload-ingress.json"
 
-// Ingress limits. The ingress serves a handful of local producers, so the
-// bounds are tight: a client that trickles a request must not pin a goroutine
-// indefinitely, and an id is an opaque producer string that is copied into the
-// re-sync set, every peer frame and the Jobs list, so it cannot be unbounded.
+// Ingress server limits. The ingress serves a handful of local producers, so
+// the bounds are tight: a client that trickles a request, or parks an idle
+// connection, must not pin a goroutine indefinitely. There
+// is deliberately no write timeout: net/http starts that clock when the request
+// headers are read and it covers the whole handler, so a broker write that
+// takes longer than the timeout would drop the response while the frame still
+// lands, and the producer would retry a frame that was already accepted.
 const (
 	localIngressBodyCap     = 1 << 20
 	localIngressReadTimeout = 10 * time.Second
 	localIngressIdleTimeout = 60 * time.Second
-	localIngressMaxIDLen    = 256
+
+	// maxIngressIDLen bounds a workload id in bytes. Ids are opaque, and one is
+	// kept in the re-sync set, in the removal memory (which is keyed by it) and
+	// in every peer's dedup index, so this bounds the id and, with
+	// maxRemovedIngress, the removal memory. It does not bound the other fields
+	// of a frame or the number of workloads being tracked: only
+	// localIngressBodyCap limits a single frame.
+	maxIngressIDLen = 256
 )
 
 // errBrokerWrite marks an ingest failure on the UPWARD write to the broker (as
@@ -55,19 +65,19 @@ var errBrokerWrite = errors.New("broker write failed")
 // another node's workload would be re-asserted to peers as this node's own.
 var errIngressOrigin = errors.New("originatedFrom must be empty or this node's UUID")
 
-// errIngressResync is a producer sending the peers' anti-entropy marker. A
-// re-assertion is this node's own act (Manager.broadcastResync); a producer's
-// frame carrying it would bypass the receivers' dedup.
-var errIngressResync = errors.New(`"resync" is reserved for peer re-assertions and is not accepted from a producer`)
+// errIngressKey is a frame whose JSON object spells a field name differently
+// from the canonical spelling. encoding/json matches keys case-insensitively
+// (with Unicode simple folding), so a variant such as "originatedfrom" would be
+// decoded as the field while slipping past a check on the exact key.
+var errIngressKey = errors.New("field names must use their exact spelling, once")
 
-// ingressParamFields and ingressWorkloadFields are the JSON keys the frame
-// decoders read: the params envelope (lifecycleParams, removeParams) and the
-// Workload inside it. They come from the struct tags, so this file never
-// duplicates the Workload schema and a field added there is covered here.
-var (
-	ingressParamFields    = append(jsonFieldNames(reflect.TypeOf(lifecycleParams{})), jsonFieldNames(reflect.TypeOf(removeParams{}))...)
-	ingressWorkloadFields = jsonFieldNames(reflect.TypeOf(Workload{}))
-)
+// errIngressResync is a frame carrying a "resync" key in any spelling. That flag
+// is the peers' own marker for an anti-entropy re-assertion, and a producer
+// never needs it.
+var errIngressResync = errors.New(`"resync" is not accepted from a producer`)
+
+// errIngressID is a workload id over maxIngressIDLen bytes.
+var errIngressID = fmt.Errorf("workload id is longer than %d bytes", maxIngressIDLen)
 
 // localIngress is the optional plaintext loopback listener for third-party
 // workload producers on THIS machine: an external scheduler, a local inference
@@ -75,17 +85,17 @@ var (
 // count and show. It shares the peer port's frame format and validation but
 // not its trust model — it never leaves loopback and is off unless configured.
 //
-// A frame accepted here is treated as local origin: tracked for re-sync,
-// broadcast to pinned peers, and emitted UP to the broker as the translated
-// workloads:upsert / workloads:remove, exactly as if one of the proxies had
-// produced it. That upward emission is the difference from the stdio path
-// (whose frames the broker has already applied before forwarding them here).
+// A frame accepted here is treated as local origin: emitted UP to the broker as
+// the translated workloads:upsert / workloads:remove, exactly as if one of the
+// proxies had produced it, and then tracked for re-sync and broadcast to pinned
+// peers (Manager.ingestLocal). That upward emission is the difference from the
+// stdio path (whose frames the broker has already applied before forwarding
+// them here).
 //
 // Loopback is not a trust boundary against a browser: a web page can POST to
 // 127.0.0.1, and a rebinding page can reach it under its own hostname. The
 // handler therefore refuses anything a browser could send (an Origin header, a
-// non-JSON content type, a non-loopback Host) before it reads the body, and the
-// frame itself is vetted as an untrusted producer's (parseIngressFrame).
+// non-JSON content type, a non-loopback Host) before it reads the body.
 type localIngress struct {
 	addr   string
 	ingest func(method string, params json.RawMessage) error
@@ -136,9 +146,6 @@ func (li *localIngress) Addr() string {
 	return li.ln.Addr().String()
 }
 
-// newServer builds the ingress server. It sets no WriteTimeout: that deadline
-// covers the whole handler, so a slow broker write would lose the response
-// after the frame had already landed, and the producer would retry it.
 func (li *localIngress) newServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc(eventsPath, li.handle)
@@ -187,8 +194,7 @@ func (li *localIngress) hostAllowed(hostport string) bool {
 // 405 for a method other than POST, 421 for a Host that is not this loopback
 // listener, 403 for any Origin header (no legitimate producer is a browser page),
 // and 415 for a content type other than application/json (which also keeps a
-// cross-origin "simple" request from delivering a body at all). A body over
-// localIngressBodyCap is 413; a frame the producer got wrong is 400.
+// cross-origin "simple" request from delivering a body at all).
 func (li *localIngress) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -242,94 +248,87 @@ func (li *localIngress) badRequest(w http.ResponseWriter, reason string) {
 	li.reject(w, http.StatusBadRequest, reason)
 }
 
+// reject answers a refused request and closes the connection after the answer.
+// The header checks run before the body is read, and net/http drains an unread
+// body on a keep-alive connection before it sends the reply, so a client that
+// declares a body it never sends would otherwise wait out the read timeout for
+// its answer.
 func (li *localIngress) reject(w http.ResponseWriter, status int, reason string) {
 	slog.Warn("local ingress request rejected", "status", status, "reason", reason)
+	w.Header().Set("Connection", "close")
 	http.Error(w, reason, status)
 }
 
-// parseIngressFrame validates a frame from a local producer and returns the
-// params to apply. It is the ingress's trust boundary, applied on top of the
-// checks every local frame gets (parseLifecycle, parseRemove): the producer may
-// only report workloads that run on this node, in a lifecycle state the rest of
-// the system knows, under an id of sane length. The stdio path never comes
-// through here. The decoded values are checked as well as the raw JSON, so a
-// spelling the raw checks did not foresee still cannot reach the broker or the
-// peers.
-func parseIngressFrame(method string, params json.RawMessage, selfUUID string) (json.RawMessage, error) {
+// parseIngressFrame validates a frame from a local producer. It is the ingress's
+// trust boundary, applied on top of the checks every local frame gets
+// (parseLocalFrame): the producer may only report workloads that run on this
+// node, in a lifecycle state the rest of the system knows.
+func parseIngressFrame(method string, params json.RawMessage, selfUUID string) (localFrame, error) {
 	params, err := normalizeIngressParams(method, params, selfUUID)
 	if err != nil {
-		return nil, err
+		return localFrame{}, err
 	}
-	if method == MethodRemove {
-		workloadID, originatedFrom, err := parseRemove(params)
-		if err != nil {
-			return nil, err
-		}
-		if err := checkIngressRemoval(workloadID, originatedFrom, selfUUID); err != nil {
-			return nil, err
-		}
-		return params, nil
-	}
-	wl, err := parseLifecycle(params)
+	f, err := parseLocalFrame(method, params)
 	if err != nil {
-		return nil, err
+		return localFrame{}, err
 	}
-	if err := checkIngressWorkload(wl, selfUUID); err != nil {
-		return nil, err
+	if err := validateIngressFrame(f, selfUUID); err != nil {
+		return localFrame{}, err
 	}
-	return params, nil
+	f.ingress = true
+	return f, nil
 }
 
-// checkIngressWorkload holds a decoded lifecycle workload to the ingress rules.
-func checkIngressWorkload(wl *Workload, selfUUID string) error {
-	if len(wl.ID) > localIngressMaxIDLen {
-		return fmt.Errorf("workloadInfo.id is longer than %d bytes", localIngressMaxIDLen)
+// validateIngressFrame checks the DECODED values of a frame, the ones that are
+// emitted to the broker, tracked and sent to peers. It does not depend on how
+// the producer spelt the JSON, so the rules hold even for an input that
+// normalizeIngressParams did not anticipate.
+func validateIngressFrame(f localFrame, selfUUID string) error {
+	if f.wl != nil {
+		if f.wl.OriginatedFrom != selfUUID {
+			return errIngressOrigin
+		}
+		// Any state other than the three terminal ones is tracked as active with
+		// no expiry, so a misspelt state would be re-asserted to peers forever.
+		if !isWorkloadState(f.wl.State) {
+			return fmt.Errorf("workloadInfo.state %q is not a known state", f.wl.State)
+		}
+		if len(f.wl.ID) > maxIngressIDLen {
+			return errIngressID
+		}
+		return nil
 	}
-	if wl.OriginatedFrom != selfUUID {
+	if f.removeNode != selfUUID {
 		return errIngressOrigin
 	}
-	// Any state other than the two terminal ones is tracked as active with no
-	// expiry, so a misspelt state would be re-asserted to peers forever.
-	if !isWorkloadState(wl.State) {
-		return fmt.Errorf("workloadInfo.state %q is not a known state", wl.State)
+	if len(f.removeID) > maxIngressIDLen {
+		return errIngressID
 	}
 	return nil
 }
 
-// checkIngressRemoval holds a decoded removal to the ingress rules.
-func checkIngressRemoval(workloadID, originatedFrom, selfUUID string) error {
-	if len(workloadID) > localIngressMaxIDLen {
-		return fmt.Errorf("params.workloadId is longer than %d bytes", localIngressMaxIDLen)
-	}
-	if originatedFrom != selfUUID {
-		return errIngressOrigin
-	}
-	return nil
-}
-
-// isWorkloadState is true for the lifecycle states this release defines. Keep it
-// in step with the WorkloadState constants in workload.go.
 func isWorkloadState(s WorkloadState) bool {
 	switch s {
-	case StateInitializing, StateQueued, StateRunning, StateCompleted, StateFailed:
+	case StateQueued, StateRunning, StateCompleted, StateFailed, StateCancelled:
 		return true
 	}
 	return false
 }
 
 // normalizeIngressParams fills originatedFrom with this node's UUID when a local
-// producer left it empty — the same courtesy the broker extends to the proxies —
+// producer left it empty, the same courtesy the broker extends to the proxies,
 // and rejects any other value. Lifecycle frames carry it inside
-// params.workloadInfo; removals carry it at the top level. It refuses the
-// top-level "resync" flag, the peers' own marker for an anti-entropy
-// re-assertion, which would make a producer's frame bypass their dedup. The
-// params are edited as generic JSON so this file never duplicates the Workload
-// schema.
+// params.workloadInfo; removals carry it at the top level. The params are edited
+// as generic JSON so this file never duplicates the Workload schema; unknown
+// fields inside them are passed through unchanged.
 //
-// encoding/json matches field names case-insensitively, so "originatedfrom" or
-// "Resync" is read downstream as the real field while an exact-key lookup here
-// never sees it. Every object is therefore refused if a key spells a field the
-// decoders read in another case, or if two keys differ only by case.
+// Every object it reads is first checked for field names that encoding/json
+// would match to a field of the frame but that are not spelt exactly like it
+// ("originatedfrom", "WorkloadInfo"), and for two names that are one name under
+// case folding: the checks below look at the exact keys, so a variant would
+// otherwise be decoded as the field without being checked. A "resync" key in any
+// spelling is refused, since it is the peers' own marker for an anti-entropy
+// re-assertion and would make a producer's frame bypass their dedup.
 func normalizeIngressParams(method string, params json.RawMessage, selfUUID string) (json.RawMessage, error) {
 	var top map[string]json.RawMessage
 	if len(params) > 0 {
@@ -340,26 +339,29 @@ func normalizeIngressParams(method string, params json.RawMessage, selfUUID stri
 	if top == nil {
 		top = map[string]json.RawMessage{}
 	}
-	for key := range top {
-		if strings.EqualFold(key, "resync") {
-			return nil, errIngressResync
-		}
-	}
-	if err := checkIngressKeys(top, ingressParamFields); err != nil {
-		return nil, err
-	}
 	self, err := json.Marshal(selfUUID)
 	if err != nil {
 		return nil, err
 	}
+	for k := range top {
+		if strings.EqualFold(k, "resync") {
+			return nil, errIngressResync
+		}
+	}
 	switch {
 	case method == MethodRemove:
+		if err := checkIngressKeys(top, removeParamNames, "params"); err != nil {
+			return nil, err
+		}
 		if err := checkIngressOrigin(top["originatedFrom"], selfUUID); err != nil {
 			return nil, err
 		}
 		top["originatedFrom"] = self
 		return json.Marshal(top)
 	case isLifecycleMethod(method):
+		if err := checkIngressKeys(top, lifecycleParamNames, "params"); err != nil {
+			return nil, err
+		}
 		var info map[string]json.RawMessage
 		if raw, ok := top["workloadInfo"]; ok && len(raw) > 0 {
 			if err := json.Unmarshal(raw, &info); err != nil {
@@ -369,8 +371,8 @@ func normalizeIngressParams(method string, params json.RawMessage, selfUUID stri
 		if info == nil {
 			return nil, fmt.Errorf("missing params.workloadInfo")
 		}
-		if err := checkIngressKeys(info, ingressWorkloadFields); err != nil {
-			return nil, fmt.Errorf("params.workloadInfo: %w", err)
+		if err := checkIngressKeys(info, workloadFieldNames, "params.workloadInfo"); err != nil {
+			return nil, err
 		}
 		if err := checkIngressOrigin(info["originatedFrom"], selfUUID); err != nil {
 			return nil, err
@@ -386,43 +388,53 @@ func normalizeIngressParams(method string, params json.RawMessage, selfUUID stri
 	return nil, fmt.Errorf("unknown method: %s", method)
 }
 
-// checkIngressOrigin accepts an absent, null or empty origin, or this node's.
-func checkIngressOrigin(raw json.RawMessage, selfUUID string) error {
-	if isEmptyJSONString(raw) {
-		return nil
+// The field names encoding/json decodes for each frame shape, read from the
+// structs themselves so a field added to the schema is covered without an edit
+// here.
+var (
+	lifecycleParamNames = jsonFieldNames(lifecycleParams{})
+	removeParamNames    = jsonFieldNames(removeParams{})
+	workloadFieldNames  = jsonFieldNames(Workload{})
+)
+
+// jsonFieldNames lists the JSON names of a struct's exported fields.
+func jsonFieldNames(v any) []string {
+	t := reflect.TypeOf(v)
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			names = append(names, name)
+		}
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil || s != selfUUID {
-		return errIngressOrigin
+	return names
+}
+
+// checkIngressKeys refuses an object with a key that folds to one of the
+// canonical field names without being spelt exactly like it, and an object with
+// two keys that are the same name under folding. It looks at the spelling of
+// the keys only; the values are validated on the decoded frame.
+func checkIngressKeys(obj map[string]json.RawMessage, canonical []string, where string) error {
+	folded := make(map[string]string, len(obj))
+	for k := range obj {
+		fk := foldKey(k)
+		if other, dup := folded[fk]; dup {
+			return fmt.Errorf("%s: %w: %q and %q", where, errIngressKey, other, k)
+		}
+		folded[fk] = k
+	}
+	for _, name := range canonical {
+		if k, ok := folded[foldKey(name)]; ok && k != name {
+			return fmt.Errorf("%s: %w: %q must be spelt %q", where, errIngressKey, k, name)
+		}
 	}
 	return nil
 }
 
-// checkIngressKeys refuses an object holding a key that names one of fields in a
-// different case, or two keys that differ only by case.
-func checkIngressKeys(obj map[string]json.RawMessage, fields []string) error {
-	canonical := make(map[string]string, len(fields))
-	for _, field := range fields {
-		canonical[foldKey(field)] = field
-	}
-	seen := make(map[string]string, len(obj))
-	for key := range obj {
-		folded := foldKey(key)
-		if other, dup := seen[folded]; dup {
-			return fmt.Errorf("keys %q and %q differ only by case", other, key)
-		}
-		seen[folded] = key
-		if field, ok := canonical[folded]; ok && key != field {
-			return fmt.Errorf("key %q must be spelled %q", key, field)
-		}
-	}
-	return nil
-}
-
-// foldKey maps s to a representative that two strings share exactly when
-// strings.EqualFold holds for them — the folding encoding/json applies when it
-// matches a key to a field — so keys that differ only by case are found in one
-// pass rather than by comparing every pair.
+// foldKey maps a name to a representative of its case-folding class: each rune
+// becomes the smallest member of its unicode.SimpleFold orbit. Two names are
+// equal under strings.EqualFold, which is the matching encoding/json applies to
+// struct keys, exactly when their foldKeys are equal.
 func foldKey(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -437,15 +449,16 @@ func foldKey(s string) string {
 	return b.String()
 }
 
-// jsonFieldNames lists the JSON keys the decoder reads into the struct type t.
-func jsonFieldNames(t reflect.Type) []string {
-	var names []string
-	for i := 0; i < t.NumField(); i++ {
-		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
-			names = append(names, name)
-		}
+// checkIngressOrigin accepts an absent, null or empty origin, or this node's.
+func checkIngressOrigin(raw json.RawMessage, selfUUID string) error {
+	if isEmptyJSONString(raw) {
+		return nil
 	}
-	return names
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || s != selfUUID {
+		return errIngressOrigin
+	}
+	return nil
 }
 
 // isEmptyJSONString is true for an absent field, JSON null, or "".

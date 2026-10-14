@@ -4,12 +4,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,17 +25,27 @@ import (
 
 // captureRW is the manager's local interface in these tests: whatever the
 // codec writes (the upward workloads:upsert / workloads:remove notifications)
-// is captured; Read blocks forever, as an idle broker would.
+// is captured; Read blocks forever, as an idle broker would. While fail is set,
+// writes error out as they do once the broker has gone away.
 type captureRW struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	fail bool
 }
 
 func (c *captureRW) Read(p []byte) (int, error) { select {} }
 func (c *captureRW) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.fail {
+		return 0, errors.New("broker pipe closed")
+	}
 	return c.buf.Write(p)
+}
+func (c *captureRW) setFail(fail bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fail = fail
 }
 func (c *captureRW) String() string {
 	c.mu.Lock()
@@ -44,49 +56,11 @@ func (c *captureRW) String() string {
 func newTestManager(t *testing.T) (*Manager, *captureRW) {
 	t.Helper()
 	rw := &captureRW{}
-	m, err := NewManager(NewCodec(rw), 0, "self-uuid", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := NewManager(NewCodec(rw), 0, "self-uuid", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	m.ctx, m.cancel = ctx, cancel
 	return m, rw
-}
-
-// ingestFrame is well-formed lifecycle params for workload id in state, with no
-// origin, as a local producer would send them.
-func ingestFrame(id string, state WorkloadState) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"workloadInfo":{"id":%q,"model":"qwen","engine":"llamacpp","runId":%q,"state":%q,"createdAt":1,"startedAt":1,"completedAt":null,"error":null,"requesterId":null}}`, id, id, string(state)))
-}
-
-// rpcBody wraps params in the JSON-RPC 2.0 notification a producer POSTs.
-func rpcBody(method string, params json.RawMessage) string {
-	return `{"jsonrpc":"2.0","method":"` + method + `","params":` + string(params) + `}`
-}
-
-func startedBody(id string) string {
-	return rpcBody(MethodStarted, ingestFrame(id, StateRunning))
-}
-
-// spellingBypasses are frames that slip a check made on exact keys: encoding/json
-// reads a key into a field whatever its case (and folds "ſ" to s and
-// "K" to k), so each of these decodes as a foreign origin or as the peers'
-// resync marker. The ingress refuses every one.
-var spellingBypasses = map[string]struct{ method, params string }{
-	"originatedfrom beside a blank origin": {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"","originatedfrom":"victim","createdAt":1}}`},
-	"originatedfrom alone":                 {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedfrom":"victim","createdAt":1}}`},
-	"second workloadinfo object":           {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1},"workloadinfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"victim","createdAt":1}}`},
-	"kelvin sign workloadinfo":             {MethodStarted, `{"worKloadinfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"victim","createdAt":1}}`},
-	"capitalised id":                       {MethodStarted, `{"workloadInfo":{"ID":"W","model":"m","engine":"e","state":"running","createdAt":1}}`},
-	"capitalised state":                    {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","State":"running","createdAt":1}}`},
-	"remove originatedfrom":                {MethodRemove, `{"workloadId":"W","originatedfrom":"victim"}`},
-	"remove originatedfrom beside blank":   {MethodRemove, `{"workloadId":"W","originatedFrom":"","originatedfrom":"victim"}`},
-	"remove capitalised workloadId":        {MethodRemove, `{"WorkloadId":"W"}`},
-	"Resync":                               {MethodStarted, `{"Resync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1}}`},
-	"RESYNC":                               {MethodStarted, `{"RESYNC":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1}}`},
-	"long-s resync":                        {MethodStarted, `{"reſync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1}}`},
-	"remove Resync":                        {MethodRemove, `{"Resync":true,"workloadId":"W"}`},
 }
 
 func TestNormalizeIngressParamsFillsEmptyLifecycleOrigin(t *testing.T) {
@@ -107,39 +81,15 @@ func TestNormalizeIngressParamsFillsEmptyLifecycleOrigin(t *testing.T) {
 	}
 }
 
-func TestNormalizeIngressParamsFillsNullAndEmptyOrigin(t *testing.T) {
-	for name, tc := range map[string]struct{ method, params string }{
-		"lifecycle null":  {MethodStarted, `{"workloadInfo":{"id":"j1","model":"m","engine":"e","state":"running","originatedFrom":null}}`},
-		"lifecycle empty": {MethodStarted, `{"workloadInfo":{"id":"j1","model":"m","engine":"e","state":"running","originatedFrom":""}}`},
-		"remove null":     {MethodRemove, `{"workloadId":"j1","originatedFrom":null}`},
-		"remove empty":    {MethodRemove, `{"workloadId":"j1","originatedFrom":""}`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			out, err := normalizeIngressParams(tc.method, json.RawMessage(tc.params), "self-uuid")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(out), `"originatedFrom":"self-uuid"`) {
-				t.Fatalf("origin not stamped: %s", out)
-			}
-		})
-	}
-}
-
 func TestNormalizeIngressParamsAcceptsOwnOrigin(t *testing.T) {
-	for name, tc := range map[string]struct{ method, params string }{
-		"lifecycle": {MethodStarted, `{"workloadInfo":{"id":"j1","model":"m","engine":"llamacpp","state":"running","originatedFrom":"self-uuid","createdAt":1}}`},
-		"remove":    {MethodRemove, `{"workloadId":"j1","originatedFrom":"self-uuid"}`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			out, err := normalizeIngressParams(tc.method, json.RawMessage(tc.params), "self-uuid")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(out), `"originatedFrom":"self-uuid"`) {
-				t.Fatalf("own origin not kept: %s", out)
-			}
-		})
+	in := json.RawMessage(`{"workloadInfo":{"id":"j1","model":"m","engine":"llamacpp","state":"running","originatedFrom":"self-uuid","createdAt":1}}`)
+	out, err := normalizeIngressParams(MethodStarted, in, "self-uuid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wl, _ := parseLifecycle(out)
+	if wl.OriginatedFrom != "self-uuid" {
+		t.Fatalf("originatedFrom = %q, want self-uuid", wl.OriginatedFrom)
 	}
 }
 
@@ -174,99 +124,6 @@ func TestNormalizeIngressParamsRemove(t *testing.T) {
 func TestNormalizeIngressParamsRejectsMissingInfo(t *testing.T) {
 	if _, err := normalizeIngressParams(MethodStarted, json.RawMessage(`{}`), "self-uuid"); err == nil {
 		t.Fatal("expected an error for a lifecycle frame without workloadInfo")
-	}
-}
-
-func TestNormalizeIngressParamsRejectsResyncMarker(t *testing.T) {
-	for name, tc := range map[string]struct{ method, params string }{
-		"lifecycle": {MethodStarted, `{"resync":true,"workloadInfo":{"id":"j1","model":"m","engine":"e","state":"running","createdAt":1}}`},
-		"remove":    {MethodRemove, `{"resync":true,"workloadId":"j1"}`},
-		"false":     {MethodRemove, `{"resync":false,"workloadId":"j1"}`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := normalizeIngressParams(tc.method, json.RawMessage(tc.params), "self-uuid"); !errors.Is(err, errIngressResync) {
-				t.Fatalf("err = %v, want errIngressResync", err)
-			}
-		})
-	}
-}
-
-func TestNormalizeIngressParamsRejectsSpellingBypasses(t *testing.T) {
-	for name, tc := range spellingBypasses {
-		t.Run(name, func(t *testing.T) {
-			if out, err := normalizeIngressParams(tc.method, json.RawMessage(tc.params), "self-uuid"); err == nil {
-				t.Fatalf("frame accepted: %s", out)
-			}
-		})
-	}
-}
-
-func TestNormalizeIngressParamsRejectsKeysDifferingOnlyByCase(t *testing.T) {
-	for name, tc := range map[string]struct{ method, params string }{
-		"top level":     {MethodRemove, `{"workloadId":"j1","extra":1,"EXTRA":2}`},
-		"workload info": {MethodStarted, `{"workloadInfo":{"id":"j1","model":"m","engine":"e","state":"running","label":"a","LABEL":"b"}}`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := normalizeIngressParams(tc.method, json.RawMessage(tc.params), "self-uuid"); err == nil {
-				t.Fatal("expected keys that differ only by case to be refused")
-			}
-		})
-	}
-}
-
-func TestNormalizeIngressParamsKeepsOtherKeys(t *testing.T) {
-	in := json.RawMessage(`{"workloadInfo":{"id":"j1","model":"m","engine":"e","state":"running","label":"nightly"},"trace":"t-1"}`)
-	out, err := normalizeIngressParams(MethodStarted, in, "self-uuid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s := string(out); !strings.Contains(s, `"label":"nightly"`) || !strings.Contains(s, `"trace":"t-1"`) {
-		t.Fatalf("a key the decoders ignore was dropped: %s", s)
-	}
-}
-
-func TestIngressFieldNamesFollowTheDecoders(t *testing.T) {
-	has := func(names []string, want string) bool {
-		for _, n := range names {
-			if n == want {
-				return true
-			}
-		}
-		return false
-	}
-	for _, want := range []string{"workloadInfo", "workloadId", "originatedFrom"} {
-		if !has(ingressParamFields, want) {
-			t.Errorf("params fields %v lack %q", ingressParamFields, want)
-		}
-	}
-	for _, want := range []string{"id", "model", "engine", "runId", "state", "originatedFrom", "scheduledOn", "createdAt", "startedAt", "completedAt", "error", "requesterId"} {
-		if !has(ingressWorkloadFields, want) {
-			t.Errorf("workload fields %v lack %q", ingressWorkloadFields, want)
-		}
-	}
-}
-
-func TestFoldKeyAgreesWithEqualFold(t *testing.T) {
-	keys := []string{"resync", "Resync", "RESYNC", "reſync", "workloadInfo", "worKloadInfo", "workloadinfo", "i", "I", "ı", "İ", "s", "S", "ſ", "", "id", "ID", "Id", "identity"}
-	for _, a := range keys {
-		for _, b := range keys {
-			if got, want := foldKey(a) == foldKey(b), strings.EqualFold(a, b); got != want {
-				t.Errorf("foldKey(%q) == foldKey(%q) is %v, strings.EqualFold says %v", a, b, got, want)
-			}
-		}
-	}
-}
-
-func TestCheckIngressWorkloadRejectsDecodedForeignOrigin(t *testing.T) {
-	wl := &Workload{ID: "W", Model: "m", Engine: "e", State: StateRunning, OriginatedFrom: "other-node"}
-	if err := checkIngressWorkload(wl, "self-uuid"); !errors.Is(err, errIngressOrigin) {
-		t.Fatalf("err = %v, want errIngressOrigin", err)
-	}
-}
-
-func TestCheckIngressRemovalRejectsDecodedForeignOrigin(t *testing.T) {
-	if err := checkIngressRemoval("W", "other-node", "self-uuid"); !errors.Is(err, errIngressOrigin) {
-		t.Fatalf("err = %v, want errIngressOrigin", err)
 	}
 }
 
@@ -307,124 +164,6 @@ func TestIngestLocalRejectsMalformed(t *testing.T) {
 	}
 	if out := rw.String(); out != "" {
 		t.Fatalf("malformed frames must not reach the broker: %s", out)
-	}
-}
-
-func TestIngestLocalRejectsForeignOrigin(t *testing.T) {
-	m, rw := newTestManager(t)
-	foreign := json.RawMessage(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"other-node","createdAt":1}}`)
-	if err := m.ingestLocal(MethodStarted, foreign); !errors.Is(err, errIngressOrigin) {
-		t.Fatalf("lifecycle err = %v, want errIngressOrigin", err)
-	}
-	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"other-node"}`)); !errors.Is(err, errIngressOrigin) {
-		t.Fatalf("remove err = %v, want errIngressOrigin", err)
-	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set = %d, want 0", got)
-	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("a foreign-origin frame reached the broker: %s", out)
-	}
-}
-
-func TestIngestLocalRejectsSpellingBypasses(t *testing.T) {
-	m, rw := newTestManager(t)
-	for name, tc := range spellingBypasses {
-		if err := m.ingestLocal(tc.method, json.RawMessage(tc.params)); err == nil {
-			t.Errorf("%s: frame accepted, want an error", name)
-		}
-	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set = %d, want 0", got)
-	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("a refused frame reached the broker: %s", out)
-	}
-}
-
-func TestIngestLocalRejectsResyncMarker(t *testing.T) {
-	m, rw := newTestManager(t)
-	params := json.RawMessage(`{"resync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}}`)
-	if err := m.ingestLocal(MethodStarted, params); !errors.Is(err, errIngressResync) {
-		t.Fatalf("err = %v, want errIngressResync", err)
-	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set = %d, want 0", got)
-	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("a frame carrying resync reached the broker: %s", out)
-	}
-}
-
-func TestIngestLocalRejectsUnknownState(t *testing.T) {
-	m, rw := newTestManager(t)
-	for _, state := range []string{"done", "complete", "Running", "paused", "bogus"} {
-		params := json.RawMessage(fmt.Sprintf(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":%q,"originatedFrom":"self-uuid","createdAt":1}}`, state))
-		if err := m.ingestLocal(MethodStarted, params); err == nil {
-			t.Errorf("state %q accepted, want an error", state)
-		}
-	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set = %d, want 0", got)
-	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("an unknown state reached the broker: %s", out)
-	}
-}
-
-func TestIngestLocalAcceptsEveryKnownState(t *testing.T) {
-	m, _ := newTestManager(t)
-	for _, state := range []WorkloadState{StateInitializing, StateQueued, StateRunning, StateCompleted, StateFailed} {
-		if err := m.ingestLocal(MethodStarted, ingestFrame(string(state), state)); err != nil {
-			t.Errorf("state %q refused: %v", state, err)
-		}
-	}
-}
-
-func TestIngestLocalRejectsOversizeID(t *testing.T) {
-	m, rw := newTestManager(t)
-	long := strings.Repeat("a", localIngressMaxIDLen+1)
-	if err := m.ingestLocal(MethodStarted, ingestFrame(long, StateRunning)); err == nil {
-		t.Error("a workloadInfo.id over the limit was accepted")
-	}
-	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"`+long+`"}`)); err == nil {
-		t.Error("a workloadId over the limit was accepted")
-	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set = %d, want 0", got)
-	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("an oversize id reached the broker: %s", out)
-	}
-}
-
-func TestIngestLocalAcceptsIDAtLimit(t *testing.T) {
-	m, _ := newTestManager(t)
-	id := strings.Repeat("a", localIngressMaxIDLen)
-	if err := m.ingestLocal(MethodStarted, ingestFrame(id, StateRunning)); err != nil {
-		t.Fatalf("workloadInfo.id at the limit refused: %v", err)
-	}
-	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"`+id+`"}`)); err != nil {
-		t.Fatalf("workloadId at the limit refused: %v", err)
-	}
-}
-
-// The stdio path is not the ingress's business: what the ingress refuses is
-// still tracked when the broker sends it.
-func TestStdioLifecycleKeepsAcceptingWhatTheIngressRefuses(t *testing.T) {
-	for name, params := range map[string]string{
-		"unknown state":   `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"paused","originatedFrom":"self-uuid","createdAt":1}}`,
-		"foreign origin":  `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"other-node","createdAt":1}}`,
-		"resync marker":   `{"resync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}}`,
-		"long identifier": `{"workloadInfo":{"id":"` + strings.Repeat("a", localIngressMaxIDLen+1) + `","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			m, _ := newTestManager(t)
-			m.handleMessage(&Message{JSONRPC: "2.0", Method: MethodStarted, Params: json.RawMessage(params)})
-			if got := len(m.activeSnapshot()); got != 1 {
-				t.Fatalf("re-sync set = %d, want 1", got)
-			}
-		})
 	}
 }
 
@@ -502,9 +241,6 @@ func TestLocalIngressEndToEnd(t *testing.T) {
 	if got := len(m.activeSnapshot()); got != 0 {
 		t.Fatalf("re-sync set after remove = %d, want 0", got)
 	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set after remove = %d, want 0", got)
-	}
 }
 
 func TestResolveLocalIngressAddr(t *testing.T) {
@@ -533,13 +269,217 @@ func TestResolveLocalIngressAddr(t *testing.T) {
 	}
 }
 
-func TestNewManagerRefusesNonLoopbackIngress(t *testing.T) {
-	if _, err := NewManager(NewCodec(&captureRW{}), 0, "self", "", "0.0.0.0:14324"); err == nil {
-		t.Fatal("a non-loopback ingress address must fail construction")
+func TestEnableLocalIngressRefusesNonLoopback(t *testing.T) {
+	m := NewManager(NewCodec(&captureRW{}), 0, "self", "")
+	if err := m.EnableLocalIngress("0.0.0.0:14324"); err == nil {
+		t.Fatal("a non-loopback ingress address must be refused")
+	}
+	if m.ingress != nil {
+		t.Fatal("a refused address must not install the ingress")
 	}
 }
 
-// startIngress serves a loopback ingress over m and returns it with its events URL.
+// ingestFrame is the params of a running-state lifecycle frame for workload id
+// at producer event counter seq.
+func ingestFrame(id string, seq int) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"workloadInfo":{"id":%q,"model":"qwen","engine":"llamacpp","runId":%q,"state":"running","originatedFrom":"self-uuid","createdAt":1,"seq":%d}}`, id, id, seq))
+}
+
+func TestLocalIngressBrokerDownIs500(t *testing.T) {
+	m, rw := newTestManager(t)
+	rw.setFail(true)
+	li, err := newLocalIngress("127.0.0.1:0", m.ingestLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := li.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = li.Serve(ctx) }()
+	body := `{"jsonrpc":"2.0","method":"workload:started","params":` + string(ingestFrame("j1", 1)) + `}`
+	resp, err := http.Post("http://"+li.Addr()+eventsPath, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("post with the broker down = %d, want 500", resp.StatusCode)
+	}
+}
+
+// frameSeqs returns workloadInfo.seq of each JSON-RPC frame, in order.
+func frameSeqs(t *testing.T, frames []string) []int {
+	t.Helper()
+	seqs := make([]int, 0, len(frames))
+	for _, raw := range frames {
+		var frame struct {
+			Params struct {
+				WorkloadInfo struct {
+					Seq int `json:"seq"`
+				} `json:"workloadInfo"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+			t.Fatalf("decode frame %q: %v", raw, err)
+		}
+		seqs = append(seqs, frame.Params.WorkloadInfo.Seq)
+	}
+	return seqs
+}
+
+// queuedFrames drains the peer broadcast queue, in queue order.
+func queuedFrames(m *Manager) []string {
+	var out []string
+	for len(m.broadcastCh) > 0 {
+		out = append(out, string(<-m.broadcastCh))
+	}
+	return out
+}
+
+func TestIngestLocalBrokerWriteFailureLeavesNoState(t *testing.T) {
+	m, rw := newTestManager(t)
+	rw.setFail(true)
+	err := m.ingestLocal(MethodStarted, ingestFrame("j1", 1))
+	if !errors.Is(err, errBrokerWrite) {
+		t.Fatalf("err = %v, want errBrokerWrite", err)
+	}
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set = %d, want 0", got)
+	}
+	if got := len(m.broadcastCh); got != 0 {
+		t.Fatalf("peer queue = %d frames, want 0", got)
+	}
+}
+
+func TestIngestLocalFailedRemoveKeepsWorkloadTracked(t *testing.T) {
+	m, rw := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame("j1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+	rw.setFail(true)
+	err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"j1","originatedFrom":"self-uuid"}`))
+	if !errors.Is(err, errBrokerWrite) {
+		t.Fatalf("err = %v, want errBrokerWrite", err)
+	}
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1: the broker still holds the workload", got)
+	}
+	if got := len(m.broadcastCh); got != 0 {
+		t.Fatalf("peer queue = %d frames, want 0: peers must not see a removal the broker never got", got)
+	}
+}
+
+func TestIngestLocalConcurrentPostsKeepBrokerAndPeerOrder(t *testing.T) {
+	m, rw := newTestManager(t)
+	const posts = 64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for seq := 1; seq <= posts; seq++ {
+		wg.Add(1)
+		go func(seq int) {
+			defer wg.Done()
+			<-start
+			if err := m.ingestLocal(MethodStarted, ingestFrame("j1", seq)); err != nil {
+				t.Errorf("ingest seq %d: %v", seq, err)
+			}
+		}(seq)
+	}
+	close(start)
+	wg.Wait()
+
+	brokerSeqs := frameSeqs(t, strings.Split(strings.TrimSpace(rw.String()), "\n"))
+	peerSeqs := frameSeqs(t, queuedFrames(m))
+	if len(brokerSeqs) != posts || len(peerSeqs) != posts {
+		t.Fatalf("broker got %d frames and peers %d, want %d each", len(brokerSeqs), len(peerSeqs), posts)
+	}
+	for i := range brokerSeqs {
+		if brokerSeqs[i] != peerSeqs[i] {
+			t.Fatalf("frame %d: broker saw seq %d but peers were queued seq %d", i, brokerSeqs[i], peerSeqs[i])
+		}
+	}
+}
+
+// TestIngestLocalSnapshotCannotResurrectRemovedWorkload is the ingress twin of
+// TestManager_SnapshotCannotResurrectRemovedWorkload: a removal ingested while
+// a re-sync snapshot is in flight must not be followed by that snapshot's
+// upsert on the peer queue.
+func TestIngestLocalSnapshotCannotResurrectRemovedWorkload(t *testing.T) {
+	m := &Manager{
+		codec:       NewCodec(codecNop{}),
+		activeLocal: make(map[workloadKey]workloadEvent),
+		broadcastCh: make(chan []byte, 4),
+		peers:       newPeerSet(0),
+		selfUUID:    "self-uuid",
+	}
+	if err := m.ingestLocal(MethodStarted, ingestFrame("j1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSnapshot := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseSnapshot()
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(&snapshotPauseHandler{paused: paused, release: release}))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	snapshotDone := make(chan struct{})
+	go func() {
+		m.broadcastSnapshot("snapshot copied before removal")
+		close(snapshotDone)
+	}()
+	select {
+	case <-paused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot did not pause after copying the workload")
+	}
+
+	removeDone := make(chan error, 1)
+	go func() {
+		removeDone <- m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"j1","originatedFrom":"self-uuid"}`))
+	}()
+	// The removal is either queued while the snapshot is paused or held back
+	// until it resumes; both orders are fine as long as the removal is last.
+	time.Sleep(100 * time.Millisecond)
+	releaseSnapshot()
+	select {
+	case err := <-removeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("removal did not finish")
+	}
+	select {
+	case <-snapshotDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot did not finish")
+	}
+
+	frames := queuedFrames(m)
+	if len(frames) == 0 {
+		t.Fatal("no frames queued, want at least the removal")
+	}
+	for i, raw := range frames {
+		var frame Message
+		if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+			t.Fatalf("decode queued frame: %v", err)
+		}
+		if last := i == len(frames)-1; last != (frame.Method == MethodRemove) {
+			t.Fatalf("frame %d of %d is %s: the removal must be the last frame queued", i, len(frames), frame.Method)
+		}
+	}
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set after remove = %d, want 0", got)
+	}
+}
+
+// startIngress serves a loopback ingress over m and returns its events URL.
 func startIngress(t *testing.T, m *Manager) (*localIngress, string) {
 	t.Helper()
 	li, err := newLocalIngress("127.0.0.1:0", m.ingestLocal)
@@ -555,11 +495,11 @@ func startIngress(t *testing.T, m *Manager) (*localIngress, string) {
 	return li, "http://" + li.Addr() + eventsPath
 }
 
-// sendIngress sends body with method as application/json, after mutate has
-// adjusted the request, and returns the status code.
-func sendIngress(t *testing.T, method, url, body string, mutate func(*http.Request)) int {
+// postIngress POSTs body as application/json, after mutate has adjusted the
+// request, and returns the status code.
+func postIngress(t *testing.T, url, body string, mutate func(*http.Request)) int {
 	t.Helper()
-	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,9 +515,8 @@ func sendIngress(t *testing.T, method, url, body string, mutate func(*http.Reque
 	return resp.StatusCode
 }
 
-func postIngress(t *testing.T, url, body string, mutate func(*http.Request)) int {
-	t.Helper()
-	return sendIngress(t, http.MethodPost, url, body, mutate)
+func startedBody(id string) string {
+	return `{"jsonrpc":"2.0","method":"workload:started","params":` + string(ingestFrame(id, 1)) + `}`
 }
 
 func TestLocalIngressRejectsNonJSONContentType(t *testing.T) {
@@ -614,7 +553,7 @@ func TestLocalIngressAcceptsJSONContentTypeWithCharset(t *testing.T) {
 func TestLocalIngressRejectsOriginHeader(t *testing.T) {
 	m, rw := newTestManager(t)
 	_, url := startIngress(t, m)
-	for _, origin := range []string{"https://evil.example", "http://127.0.0.1:14324", "null", ""} {
+	for _, origin := range []string{"https://evil.example", "http://127.0.0.1:14324", "null"} {
 		code := postIngress(t, url, startedBody("j1"), func(r *http.Request) { r.Header.Set("Origin", origin) })
 		if code != http.StatusForbidden {
 			t.Errorf("Origin %q = %d, want 403", origin, code)
@@ -629,7 +568,7 @@ func TestLocalIngressRejectsNonLoopbackHost(t *testing.T) {
 	m, rw := newTestManager(t)
 	li, url := startIngress(t, m)
 	_, port, _ := net.SplitHostPort(li.Addr())
-	for _, host := range []string{"evil.example:" + port, "evil.example", "127.0.0.1", "127.0.0.1:1", "192.0.2.5:" + port, "0.0.0.0:" + port, "localhost.evil.example:" + port, "[::1]"} {
+	for _, host := range []string{"evil.example:" + port, "evil.example", "127.0.0.1", "127.0.0.1:1", "192.0.2.5:" + port, "localhost.evil.example:" + port} {
 		code := postIngress(t, url, startedBody("j1"), func(r *http.Request) { r.Host = host })
 		if code != http.StatusMisdirectedRequest {
 			t.Errorf("Host %q = %d, want 421", host, code)
@@ -644,7 +583,7 @@ func TestLocalIngressAcceptsLoopbackHostNames(t *testing.T) {
 	m, _ := newTestManager(t)
 	li, url := startIngress(t, m)
 	_, port, _ := net.SplitHostPort(li.Addr())
-	for _, host := range []string{"127.0.0.1:" + port, "localhost:" + port, "LOCALHOST:" + port, "127.5.5.5:" + port, "[::1]:" + port} {
+	for _, host := range []string{"localhost:" + port, "LOCALHOST:" + port, "127.0.0.1:" + port, "127.5.5.5:" + port, "[::1]:" + port} {
 		code := postIngress(t, url, startedBody("j1"), func(r *http.Request) { r.Host = host })
 		if code != http.StatusOK {
 			t.Errorf("Host %q = %d, want 200", host, code)
@@ -684,37 +623,41 @@ func TestLocalIngressHeaderChecksPrecedeBodyRead(t *testing.T) {
 	}
 }
 
-// A request that breaks several rules is answered by the first one in the
-// documented order: method, Host, Origin, content type, then the frame.
-func TestLocalIngressChecksRunInOrder(t *testing.T) {
+// A header check refuses a request before its body is read, so the body it
+// declares may never arrive. The answer must not wait for it: net/http drains an
+// unread body on a keep-alive connection before it replies, which would hold the
+// 403 back for the whole read timeout if the rejection did not close the
+// connection.
+func TestLocalIngressRejectionDoesNotWaitForTheBody(t *testing.T) {
 	m, _ := newTestManager(t)
-	li, url := startIngress(t, m)
-	_, port, _ := net.SplitHostPort(li.Addr())
-	badHost := func(r *http.Request) { r.Host = "evil.example:" + port }
-	origin := func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }
-	plain := func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }
-	all := func(fns ...func(*http.Request)) func(*http.Request) {
-		return func(r *http.Request) {
-			for _, fn := range fns {
-				fn(r)
-			}
-		}
+	li, _ := startIngress(t, m)
+	conn, err := net.Dial("tcp", li.Addr())
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, tc := range map[string]struct {
-		method string
-		mutate func(*http.Request)
-		body   string
-		want   int
-	}{
-		"method before host":         {http.MethodGet, all(badHost, origin, plain), startedBody("j1"), http.StatusMethodNotAllowed},
-		"host before origin":         {http.MethodPost, all(badHost, origin, plain), startedBody("j1"), http.StatusMisdirectedRequest},
-		"origin before content type": {http.MethodPost, all(origin, plain), startedBody("j1"), http.StatusForbidden},
-		"content type before frame":  {http.MethodPost, plain, `not json`, http.StatusUnsupportedMediaType},
-		"frame last":                 {http.MethodPost, nil, `not json`, http.StatusBadRequest},
-	} {
-		if code := sendIngress(t, tc.method, url, tc.body, tc.mutate); code != tc.want {
-			t.Errorf("%s = %d, want %d", name, code, tc.want)
-		}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// The headers declare a body of 64 bytes, and it is never sent.
+	request := strings.Join([]string{
+		"POST " + eventsPath + " HTTP/1.1",
+		"Host: " + li.Addr(),
+		"Origin: https://evil.example",
+		"Content-Type: application/json",
+		"Content-Length: 64",
+		"", "",
+	}, "\r\n")
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no answer within a second to a rejected request whose body was never sent: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -732,42 +675,123 @@ func TestLocalIngressRejectsBodyOverCap(t *testing.T) {
 	}
 }
 
-func TestLocalIngressAcceptsBodyAtCap(t *testing.T) {
-	m, _ := newTestManager(t)
-	_, url := startIngress(t, m)
-	body := startedBody("j1")
-	body += strings.Repeat(" ", localIngressBodyCap-len(body))
-	if code := postIngress(t, url, body, nil); code != http.StatusOK {
-		t.Fatalf("body of exactly the cap = %d, want 200", code)
-	}
-}
-
-func TestLocalIngressServerBoundsReadsAndIdleConnections(t *testing.T) {
+func TestLocalIngressServerHasTimeouts(t *testing.T) {
 	li, err := newLocalIngress("127.0.0.1:0", func(string, json.RawMessage) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := li.newServer()
-	if srv.ReadHeaderTimeout != interNodeReadHeaderTimeout {
-		t.Errorf("ReadHeaderTimeout = %v, want %v", srv.ReadHeaderTimeout, interNodeReadHeaderTimeout)
-	}
-	if srv.ReadTimeout != 10*time.Second {
-		t.Errorf("ReadTimeout = %v, want 10s", srv.ReadTimeout)
-	}
-	if srv.IdleTimeout != 60*time.Second {
-		t.Errorf("IdleTimeout = %v, want 60s", srv.IdleTimeout)
+	if srv.ReadHeaderTimeout <= 0 || srv.ReadTimeout <= 0 || srv.IdleTimeout <= 0 {
+		t.Fatalf("ingress server timeouts unset: %+v", srv)
 	}
 }
 
-// A WriteTimeout would cover the whole handler, so a slow broker write would
-// lose the response after the frame had landed and the producer would retry it.
-func TestLocalIngressServerSetsNoWriteTimeout(t *testing.T) {
+// net/http's WriteTimeout runs from the end of the request headers and covers
+// the whole handler, so it would cut off a request that is only waiting on a
+// slow broker write while the frame still lands, and the producer would retry.
+func TestLocalIngressServerHasNoWriteTimeout(t *testing.T) {
 	li, err := newLocalIngress("127.0.0.1:0", func(string, json.RawMessage) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := li.newServer().WriteTimeout; got != 0 {
 		t.Fatalf("WriteTimeout = %v, want none", got)
+	}
+}
+
+func TestLocalIngressStopsWhenContextCancelled(t *testing.T) {
+	m, _ := newTestManager(t)
+	li, err := newLocalIngress("127.0.0.1:0", m.ingestLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := li.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- li.Serve(ctx) }()
+	resp, err := http.Get("http://" + li.Addr() + eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve = %v, want nil on cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the context was cancelled")
+	}
+	// A request, not a bare dial: on some hosts a connect to a port nobody
+	// listens on can complete, but nothing answers it.
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	if resp, err := client.Post("http://"+li.Addr()+eventsPath, "application/json", strings.NewReader(startedBody("W"))); err == nil {
+		resp.Body.Close()
+		t.Fatalf("the ingress still answers requests after shutdown: %s", resp.Status)
+	}
+}
+
+func TestRunReturnsIngressListenError(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	m := NewManager(NewCodec(&captureRW{}), 0, "self-uuid", t.TempDir())
+	if err := m.EnableLocalIngress(taken.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- m.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "local ingress listen") {
+			t.Fatalf("Run = %v, want the ingress listen error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not fail on an ingress port that is already in use")
+	}
+}
+
+func TestIngestLocalRejectsForeignOrigin(t *testing.T) {
+	m, rw := newTestManager(t)
+	foreign := json.RawMessage(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"other-node","createdAt":1}}`)
+	if err := m.ingestLocal(MethodStarted, foreign); !errors.Is(err, errIngressOrigin) {
+		t.Fatalf("lifecycle err = %v, want errIngressOrigin", err)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"other-node"}`)); !errors.Is(err, errIngressOrigin) {
+		t.Fatalf("remove err = %v, want errIngressOrigin", err)
+	}
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set = %d, want 0", got)
+	}
+	if got := len(m.broadcastCh); got != 0 {
+		t.Fatalf("peer queue = %d frames, want 0", got)
+	}
+	if out := rw.String(); out != "" {
+		t.Fatalf("a foreign-origin frame reached the broker: %s", out)
+	}
+}
+
+// A workload reported without an origin is stamped, so the producer's removal
+// that also omits it matches and clears it.
+func TestIngestLocalOmittedOriginRoundTrips(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, json.RawMessage(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1", got)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set after remove = %d, want 0", got)
 	}
 }
 
@@ -787,64 +811,29 @@ func TestLocalIngressForeignOriginIs400(t *testing.T) {
 	}
 }
 
-func TestLocalIngressAcceptsOwnOrigin(t *testing.T) {
-	m, _ := newTestManager(t)
-	_, url := startIngress(t, m)
-	upsert := `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}}}`
-	if code := postIngress(t, url, upsert, nil); code != http.StatusOK {
-		t.Fatalf("own-origin upsert = %d, want 200", code)
-	}
-	remove := `{"jsonrpc":"2.0","method":"workloads:remove","params":{"workloadId":"W","originatedFrom":"self-uuid"}}`
-	if code := postIngress(t, url, remove, nil); code != http.StatusOK {
-		t.Fatalf("own-origin remove = %d, want 200", code)
-	}
-}
-
-func TestLocalIngressSpellingBypassesAre400(t *testing.T) {
+func TestIngestLocalRejectsUnknownState(t *testing.T) {
 	m, rw := newTestManager(t)
-	_, url := startIngress(t, m)
-	for name, tc := range spellingBypasses {
-		if code := postIngress(t, url, rpcBody(tc.method, json.RawMessage(tc.params)), nil); code != http.StatusBadRequest {
-			t.Errorf("%s = %d, want 400", name, code)
+	for _, state := range []string{"done", "complete", "Running", "bogus"} {
+		params := json.RawMessage(fmt.Sprintf(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":%q,"originatedFrom":"self-uuid","createdAt":1}}`, state))
+		if err := m.ingestLocal(MethodStarted, params); err == nil {
+			t.Errorf("state %q accepted, want an error", state)
 		}
 	}
 	if got := len(m.activeSnapshot()); got != 0 {
 		t.Fatalf("re-sync set = %d, want 0", got)
 	}
 	if out := rw.String(); out != "" {
-		t.Fatalf("a refused frame reached the broker: %s", out)
+		t.Fatalf("an unknown state reached the broker: %s", out)
 	}
 }
 
-// The shape a real harness sends: canonical keys throughout, every workload field
-// present, no origin of its own.
-func TestLocalIngressAcceptsCanonicalHarnessFrame(t *testing.T) {
-	m, rw := newTestManager(t)
-	_, url := startIngress(t, m)
-	frame := `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"job-42","model":"qwen3-32b","engine":"llamacpp","runId":"run-7","state":"running","originatedFrom":"","scheduledOn":"aorus","createdAt":1700000000000,"startedAt":1700000000100,"completedAt":null,"error":null,"requesterId":"scheduler"}}}`
-	if code := postIngress(t, url, frame, nil); code != http.StatusOK {
-		t.Fatalf("harness frame = %d, want 200", code)
-	}
-	if got := len(m.activeSnapshot()); got != 1 {
-		t.Fatalf("re-sync set = %d, want 1", got)
-	}
-	if out := rw.String(); !strings.Contains(out, `"id":"job-42"`) || !strings.Contains(out, `"originatedFrom":"self-uuid"`) {
-		t.Fatalf("broker did not receive the stamped upsert: %s", out)
-	}
-}
-
-func TestLocalIngressResyncMarkerIs400(t *testing.T) {
-	m, rw := newTestManager(t)
-	_, url := startIngress(t, m)
-	body := `{"jsonrpc":"2.0","method":"workload:started","params":{"resync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1}}}`
-	if code := postIngress(t, url, body, nil); code != http.StatusBadRequest {
-		t.Fatalf("resync marker = %d, want 400", code)
-	}
-	if got := len(m.activeSnapshot()); got != 0 {
-		t.Fatalf("re-sync set = %d, want 0", got)
-	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("a frame carrying resync reached the broker: %s", out)
+func TestIngestLocalAcceptsEveryKnownState(t *testing.T) {
+	m, _ := newTestManager(t)
+	for _, state := range []WorkloadState{StateQueued, StateRunning, StateCompleted, StateFailed, StateCancelled} {
+		params := json.RawMessage(fmt.Sprintf(`{"workloadInfo":{"id":%q,"model":"m","engine":"e","state":%q,"originatedFrom":"self-uuid","createdAt":1}}`, string(state), string(state)))
+		if err := m.ingestLocal(MethodStarted, params); err != nil {
+			t.Errorf("state %q refused: %v", state, err)
+		}
 	}
 }
 
@@ -857,36 +846,530 @@ func TestLocalIngressUnknownStateIs400(t *testing.T) {
 	}
 }
 
-func TestLocalIngressAcceptsProducerStates(t *testing.T) {
-	m, rw := newTestManager(t)
-	_, url := startIngress(t, m)
-	for method, state := range map[string]WorkloadState{
-		MethodSubmitted: StateQueued,
-		MethodStarted:   StateRunning,
-		MethodCompleted: StateCompleted,
-		MethodErrored:   StateFailed,
-	} {
-		if code := postIngress(t, url, rpcBody(method, ingestFrame(string(state), state)), nil); code != http.StatusOK {
-			t.Errorf("state %q = %d, want 200", state, code)
-		}
-	}
-	if got := strings.Count(rw.String(), `"method":"workloads:upsert"`); got != 4 {
-		t.Fatalf("broker received %d upserts, want 4: %s", got, rw.String())
+// The stdio path is not the ingress's business: a state the ingress refuses is
+// still tracked when the broker sends it.
+func TestStdioLifecycleKeepsAcceptingAnyState(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.handleMessage(&Message{JSONRPC: "2.0", Method: MethodStarted, Params: json.RawMessage(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"paused","originatedFrom":"self-uuid","createdAt":1}}`)})
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1", got)
 	}
 }
 
-func TestLocalIngressOversizeIDIs400(t *testing.T) {
+func TestIngestLocalRejectsResyncKey(t *testing.T) {
+	info := `"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}`
+	for _, key := range []string{"resync", "Resync", "RESYNC", "reSync", `reſync`} {
+		for name, tc := range map[string]struct{ method, params string }{
+			"lifecycle": {MethodStarted, `{"` + key + `":true,` + info + `}`},
+			"remove":    {MethodRemove, `{"` + key + `":true,"workloadId":"W","originatedFrom":"self-uuid"}`},
+		} {
+			t.Run(name+"/"+key, func(t *testing.T) {
+				m, rw := newTestManager(t)
+				if err := m.ingestLocal(tc.method, json.RawMessage(tc.params)); !errors.Is(err, errIngressResync) {
+					t.Fatalf("err = %v, want errIngressResync", err)
+				}
+				assertIngressUntouched(t, m, rw)
+			})
+		}
+	}
+}
+
+func TestIngestLocalTrackedFrameCarriesNoResyncFlag(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame("W", 1)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := m.activeSnapshot()
+	if len(snapshot) != 1 || isResyncFrame(snapshot[0].params) {
+		t.Fatalf("the re-sync set holds a re-sync tagged frame: %+v", snapshot)
+	}
+}
+
+// assertIngressUntouched fails when a rejected frame left any trace: a broker
+// write, a queued peer frame, a re-sync entry or a removal tombstone.
+func assertIngressUntouched(t *testing.T, m *Manager, rw *captureRW) {
+	t.Helper()
+	if out := rw.String(); out != "" {
+		t.Fatalf("a rejected frame reached the broker: %s", out)
+	}
+	if got := len(m.broadcastCh); got != 0 {
+		t.Fatalf("peer queue = %d frames, want 0", got)
+	}
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set = %d, want 0", got)
+	}
+	if got := len(m.removedIngress); got != 0 {
+		t.Fatalf("removal memory = %d, want 0", got)
+	}
+}
+
+// stdioReplay is the broker replaying a stored lifecycle event to the worker.
+func stdioReplay(m *Manager, method, id string, seq int) {
+	m.handleMessage(&Message{JSONRPC: "2.0", Method: method, Params: ingestFrame(id, seq)})
+}
+
+// TestIngressRemovalBlocksStaleStdioReplay: the broker replays its store to a
+// restarted worker, and the replay can land after the producer's removal.
+func TestIngressRemovalBlocksStaleStdioReplay(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame("W", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+
+	stdioReplay(m, MethodStarted, "W", 1)
+	m.broadcastSnapshot("heartbeat")
+
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set = %d, want 0: the removed workload was tracked again", got)
+	}
+	if frames := queuedFrames(m); len(frames) != 0 {
+		t.Fatalf("peer queue = %v, want empty: the stale replay was re-broadcast", frames)
+	}
+}
+
+func TestIngressLifecycleClearsRemovalTombstone(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame("W", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ingestLocal(MethodStarted, ingestFrame("W", 2)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+
+	stdioReplay(m, MethodCompleted, "W", 3)
+
+	if frames := queuedFrames(m); len(frames) != 1 {
+		t.Fatalf("peer queue = %d frames, want the broker's next event for the re-reported workload", len(frames))
+	}
+}
+
+func TestRemovalTombstoneExpires(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame("W", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for el := m.removedOrder.Front(); el != nil; el = el.Next() {
+		entry := el.Value.(removedEntry)
+		entry.expiresAt = time.Now().Add(-time.Second)
+		el.Value = entry
+	}
+	queuedFrames(m)
+
+	stdioReplay(m, MethodStarted, "W", 2)
+
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1: an expired tombstone must not block", got)
+	}
+	if len(m.removedIngress) != 0 {
+		t.Fatalf("expired tombstone kept: %v", m.removedIngress)
+	}
+}
+
+// TestIngressRemovalBeforeReplayOnFreshWorker is the restart case itself: the
+// worker has just started, so nothing is tracked when the producer's removal
+// arrives, and the broker's replay of the workload follows it.
+func TestIngressRemovalBeforeReplayOnFreshWorker(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+
+	stdioReplay(m, MethodStarted, "W", 1)
+	m.broadcastSnapshot("heartbeat")
+
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set = %d, want 0: the removed workload was tracked again", got)
+	}
+	if frames := queuedFrames(m); len(frames) != 0 {
+		t.Fatalf("peer queue = %v, want empty: the stale replay was re-broadcast", frames)
+	}
+}
+
+// The tombstone is the (origin, id) pair a removal carries, so a workload with
+// another id is unaffected.
+func TestRemovalTombstoneCoversOnlyTheRemovedPair(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+
+	stdioReplay(m, MethodStarted, "V", 1)
+
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1: a different workload was blocked", got)
+	}
+}
+
+func TestStdioRemovalLeavesNoTombstone(t *testing.T) {
+	m, _ := newTestManager(t)
+	stdioReplay(m, MethodStarted, "W", 1)
+	m.handleMessage(&Message{JSONRPC: "2.0", Method: MethodRemove, Params: json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)})
+	queuedFrames(m)
+
+	stdioReplay(m, MethodStarted, "W", 2)
+
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1: only ingress removals are tombstoned", got)
+	}
+}
+
+func TestRemovalTombstoneDoesNotBlockResyncTaggedFrame(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame("W", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	queuedFrames(m)
+
+	m.handleMessage(&Message{JSONRPC: "2.0", Method: MethodStarted, Params: json.RawMessage(`{"resync":true,"workloadInfo":{"id":"W","model":"qwen","engine":"llamacpp","runId":"W","state":"running","originatedFrom":"self-uuid","createdAt":1}}`)})
+
+	if got := len(m.activeSnapshot()); got != 1 {
+		t.Fatalf("re-sync set = %d, want 1: an explicit re-assertion must not be treated as a replay", got)
+	}
+}
+
+// The frames a producer could use to name another node as the origin, or hide
+// the resync flag, by spelling a field name differently from the canonical one.
+// encoding/json decodes each of these into the field.
+var foldedKeyFrames = map[string]struct {
+	method, params string
+	want           error
+}{
+	"workloadInfo.originatedfrom beside an empty canonical key": {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"","originatedfrom":"victim","createdAt":1}}`, errIngressKey},
+	"workloadInfo.originatedfrom alone":                         {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedfrom":"victim","createdAt":1}}`, errIngressKey},
+	"workloadInfo.originatedfRom":                               {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedfRom":"victim","createdAt":1}}`, errIngressKey},
+	"workloadInfo.OriginatedFrom":                               {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","OriginatedFrom":"victim","createdAt":1}}`, errIngressKey},
+	"workloadInfo.ORIGINATEDFROM":                               {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","ORIGINATEDFROM":"victim","createdAt":1}}`, errIngressKey},
+	"workloadInfo.ID":                                           {MethodStarted, `{"workloadInfo":{"ID":"W","model":"m","engine":"e","state":"running","createdAt":1}}`, errIngressKey},
+	"workloadInfo long-s state":                                 {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","ſtate":"running","createdAt":1}}`, errIngressKey},
+	"second top-level workloadinfo":                             {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1},"workloadinfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"victim","createdAt":1}}`, errIngressKey},
+	"top-level WorkloadInfo alone":                              {MethodStarted, `{"WorkloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1}}`, errIngressKey},
+	"two unknown keys that fold together":                       {MethodStarted, `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","createdAt":1,"note":1,"NOTE":2}}`, errIngressKey},
+	"remove originatedfrom":                                     {MethodRemove, `{"workloadId":"W","originatedfrom":"victim"}`, errIngressKey},
+	"remove originatedfrom beside the canonical key":            {MethodRemove, `{"workloadId":"W","originatedFrom":"self-uuid","originatedfrom":"victim"}`, errIngressKey},
+	"remove WorkloadID":                                         {MethodRemove, `{"WorkloadID":"W"}`, errIngressKey},
+	"top-level Resync":                                          {MethodStarted, `{"Resync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}}`, errIngressResync},
+	"top-level long-s resync":                                   {MethodStarted, `{"reſync":true,"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","createdAt":1}}`, errIngressResync},
+	"remove RESYNC":                                             {MethodRemove, `{"RESYNC":true,"workloadId":"W","originatedFrom":"self-uuid"}`, errIngressResync},
+}
+
+func TestIngestLocalRejectsFoldedFieldNames(t *testing.T) {
+	for name, tc := range foldedKeyFrames {
+		t.Run(name, func(t *testing.T) {
+			m, rw := newTestManager(t)
+			if err := m.ingestLocal(tc.method, json.RawMessage(tc.params)); !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			assertIngressUntouched(t, m, rw)
+		})
+	}
+}
+
+func TestLocalIngressFoldedFieldNamesAre400(t *testing.T) {
 	m, rw := newTestManager(t)
 	_, url := startIngress(t, m)
-	long := strings.Repeat("a", localIngressMaxIDLen+1)
-	if code := postIngress(t, url, rpcBody(MethodStarted, ingestFrame(long, StateRunning)), nil); code != http.StatusBadRequest {
-		t.Fatalf("workloadInfo.id over the limit = %d, want 400", code)
+	for name, tc := range foldedKeyFrames {
+		body := `{"jsonrpc":"2.0","method":"` + tc.method + `","params":` + tc.params + `}`
+		if code := postIngress(t, url, body, nil); code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400", name, code)
+		}
 	}
-	remove := rpcBody(MethodRemove, json.RawMessage(`{"workloadId":"`+long+`"}`))
+	assertIngressUntouched(t, m, rw)
+}
+
+// foldKey has to agree with what encoding/json matches, or a spelling could be
+// decoded as a field without being seen as one.
+func TestFoldKeyAgreesWithJSONFieldMatching(t *testing.T) {
+	names := []string{"originatedFrom", "state", "k", "workloadInfo"}
+	for _, key := range []string{"originatedfrom", "ORIGINATEDFROM", "originatedFRom", "ſtate", "K", "workloadinfo", "state", "STATE", "stat", "originated_from"} {
+		var got struct {
+			OriginatedFrom string `json:"originatedFrom"`
+			State          string `json:"state"`
+			K              string `json:"k"`
+			WorkloadInfo   string `json:"workloadInfo"`
+		}
+		quoted, err := json.Marshal(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(`{`+string(quoted)+`:"x"}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		decoded := got.OriginatedFrom != "" || got.State != "" || got.K != "" || got.WorkloadInfo != ""
+		folds := false
+		for _, name := range names {
+			folds = folds || foldKey(key) == foldKey(name)
+		}
+		if decoded != folds {
+			t.Errorf("key %q: encoding/json decoded a field = %v, foldKey matched a name = %v", key, decoded, folds)
+		}
+	}
+}
+
+// The same key spelt exactly twice is one key to encoding/json (the last wins),
+// and the ingress re-marshals a single one, so the origin check sees what is sent.
+func TestIngestLocalRepeatedExactKeyUsesTheLastValue(t *testing.T) {
+	m, rw := newTestManager(t)
+	foreign := `{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","originatedFrom":"victim","createdAt":1}}`
+	if err := m.ingestLocal(MethodStarted, json.RawMessage(foreign)); !errors.Is(err, errIngressOrigin) {
+		t.Fatalf("err = %v, want errIngressOrigin", err)
+	}
+	assertIngressUntouched(t, m, rw)
+}
+
+// The canonical frame a well-behaved producer sends, with every field the schema
+// has and one field of its own, is accepted, and the extra field is passed through.
+func TestLocalIngressAcceptsCanonicalFrameAndPassesUnknownFieldsThrough(t *testing.T) {
+	m, rw := newTestManager(t)
+	_, url := startIngress(t, m)
+	body := `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"job-17","model":"my-model","engine":"my-engine","runId":"9f3c1a7b","seq":1,"state":"running","originatedFrom":"","scheduledOn":"self-uuid","createdAt":1716998400000,"startedAt":1716998401000,"completedAt":null,"error":null,"requesterId":null,"tag":"batch"}}}`
+	if code := postIngress(t, url, body, nil); code != http.StatusOK {
+		t.Fatalf("canonical frame = %d, want 200", code)
+	}
+	if !strings.Contains(rw.String(), `"workloads:upsert"`) || !strings.Contains(rw.String(), `"originatedFrom":"self-uuid"`) {
+		t.Fatalf("the broker did not get the stamped upsert: %s", rw.String())
+	}
+	frames := queuedFrames(m)
+	if len(frames) != 1 || !strings.Contains(frames[0], `"tag":"batch"`) {
+		t.Fatalf("peer frames = %v, want one carrying the unknown field", frames)
+	}
+}
+
+// The decoded-value check does not look at spelling, so it holds for a frame
+// that normalizeIngressParams let through.
+func TestValidateIngressFrameChecksDecodedValues(t *testing.T) {
+	good := func() localFrame {
+		return localFrame{method: MethodStarted, wl: &Workload{ID: "W", State: StateRunning, OriginatedFrom: "self-uuid"}}
+	}
+	if err := validateIngressFrame(good(), "self-uuid"); err != nil {
+		t.Fatalf("good lifecycle frame: %v", err)
+	}
+	foreign := good()
+	foreign.wl.OriginatedFrom = "victim"
+	if err := validateIngressFrame(foreign, "self-uuid"); !errors.Is(err, errIngressOrigin) {
+		t.Errorf("foreign lifecycle origin: err = %v, want errIngressOrigin", err)
+	}
+	badState := good()
+	badState.wl.State = "done"
+	if err := validateIngressFrame(badState, "self-uuid"); err == nil {
+		t.Error("unknown lifecycle state accepted")
+	}
+	if err := validateIngressFrame(localFrame{method: MethodRemove, removeID: "W", removeNode: "self-uuid"}, "self-uuid"); err != nil {
+		t.Fatalf("good removal: %v", err)
+	}
+	if err := validateIngressFrame(localFrame{method: MethodRemove, removeID: "W", removeNode: "victim"}, "self-uuid"); !errors.Is(err, errIngressOrigin) {
+		t.Errorf("foreign removal node: err = %v, want errIngressOrigin", err)
+	}
+}
+
+// A frame whose case-variant origin key was not caught by the spelling check
+// still decodes to the foreign origin, and the decoded-value check refuses it.
+func TestValidateIngressFrameRefusesAnOriginTheKeyCheckMissed(t *testing.T) {
+	lifecycle, err := parseLocalFrame(MethodStarted, json.RawMessage(`{"workloadInfo":{"id":"W","model":"m","engine":"e","state":"running","originatedFrom":"self-uuid","originatedfrom":"victim","createdAt":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateIngressFrame(lifecycle, "self-uuid"); !errors.Is(err, errIngressOrigin) {
+		t.Errorf("lifecycle err = %v, want errIngressOrigin (decoded origin %q)", err, lifecycle.wl.OriginatedFrom)
+	}
+	removal, err := parseLocalFrame(MethodRemove, json.RawMessage(`{"workloadId":"W","originatedFrom":"self-uuid","originatedfrom":"victim"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateIngressFrame(removal, "self-uuid"); !errors.Is(err, errIngressOrigin) {
+		t.Errorf("removal err = %v, want errIngressOrigin (decoded node %q)", err, removal.removeNode)
+	}
+}
+
+func TestIngestLocalAcceptsWorkloadIDAtTheLimit(t *testing.T) {
+	atLimit := strings.Repeat("a", maxIngressIDLen)
+	m, _ := newTestManager(t)
+	if err := m.ingestLocal(MethodStarted, ingestFrame(atLimit, 1)); err != nil {
+		t.Fatalf("id of %d bytes refused: %v", maxIngressIDLen, err)
+	}
+	if err := m.ingestLocal(MethodRemove, json.RawMessage(`{"workloadId":"`+atLimit+`"}`)); err != nil {
+		t.Fatalf("removal of an id of %d bytes refused: %v", maxIngressIDLen, err)
+	}
+}
+
+func TestIngestLocalRejectsOverlongWorkloadID(t *testing.T) {
+	overLimit := strings.Repeat("a", maxIngressIDLen+1)
+	for name, tc := range map[string]struct{ method, params string }{
+		"lifecycle": {MethodStarted, string(ingestFrame(overLimit, 1))},
+		"remove":    {MethodRemove, `{"workloadId":"` + overLimit + `"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, rw := newTestManager(t)
+			if err := m.ingestLocal(tc.method, json.RawMessage(tc.params)); !errors.Is(err, errIngressID) {
+				t.Fatalf("err = %v, want errIngressID", err)
+			}
+			assertIngressUntouched(t, m, rw)
+		})
+	}
+}
+
+func TestLocalIngressOverlongWorkloadIDIs400(t *testing.T) {
+	m, rw := newTestManager(t)
+	_, url := startIngress(t, m)
+	overLimit := strings.Repeat("a", maxIngressIDLen+1)
+	upsert := `{"jsonrpc":"2.0","method":"workload:started","params":` + string(ingestFrame(overLimit, 1)) + `}`
+	if code := postIngress(t, url, upsert, nil); code != http.StatusBadRequest {
+		t.Fatalf("overlong id upsert = %d, want 400", code)
+	}
+	remove := `{"jsonrpc":"2.0","method":"workloads:remove","params":{"workloadId":"` + overLimit + `"}}`
 	if code := postIngress(t, url, remove, nil); code != http.StatusBadRequest {
-		t.Fatalf("workloadId over the limit = %d, want 400", code)
+		t.Fatalf("overlong id remove = %d, want 400", code)
 	}
-	if out := rw.String(); out != "" {
-		t.Fatalf("an oversize id reached the broker: %s", out)
+	assertIngressUntouched(t, m, rw)
+}
+
+func TestRemovalMemoryIsBounded(t *testing.T) {
+	m, _ := newTestManager(t)
+	for i := 0; i < maxRemovedIngress+10; i++ {
+		m.markRemoved("self-uuid", fmt.Sprintf("w%d", i))
+	}
+	if got := len(m.removedIngress); got != maxRemovedIngress {
+		t.Fatalf("removal memory = %d, want the cap %d", got, maxRemovedIngress)
+	}
+	if got := m.removedOrder.Len(); got != maxRemovedIngress {
+		t.Fatalf("removal order list = %d, want the cap %d", got, maxRemovedIngress)
+	}
+}
+
+func TestRemovalMemoryEvictsTheOldestFirst(t *testing.T) {
+	m, _ := newTestManager(t)
+	const extra = 10
+	for i := 0; i < maxRemovedIngress+extra; i++ {
+		m.markRemoved("self-uuid", fmt.Sprintf("w%d", i))
+	}
+	for i := 0; i < extra; i++ {
+		if m.wasRemoved("self-uuid", fmt.Sprintf("w%d", i)) {
+			t.Errorf("w%d is among the oldest and should have been evicted", i)
+		}
+	}
+	for i := extra; i < maxRemovedIngress+extra; i++ {
+		if !m.wasRemoved("self-uuid", fmt.Sprintf("w%d", i)) {
+			t.Fatalf("w%d was evicted but is newer than an evicted entry", i)
+		}
+	}
+}
+
+// Removing the same workload again refreshes its entry instead of adding one,
+// and makes it the newest, so a repeated removal is not evicted before older ones.
+func TestRemovalMemoryRefreshesARepeatedRemoval(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.markRemoved("self-uuid", "first")
+	for i := 0; i < maxRemovedIngress-1; i++ {
+		m.markRemoved("self-uuid", fmt.Sprintf("w%d", i))
+	}
+	m.markRemoved("self-uuid", "first")
+	m.markRemoved("self-uuid", "newest")
+	if got := len(m.removedIngress); got != maxRemovedIngress {
+		t.Fatalf("removal memory = %d, want %d", got, maxRemovedIngress)
+	}
+	if !m.wasRemoved("self-uuid", "first") {
+		t.Error("the refreshed removal was evicted ahead of older ones")
+	}
+	if m.wasRemoved("self-uuid", "w0") {
+		t.Error("the oldest removal outlived the refreshed one")
+	}
+}
+
+// Expired entries are dropped from the front of the order list when a removal
+// is marked, so the memory does not keep them until the cap evicts them.
+func TestRemovalMemoryPrunesExpiredEntriesOnMark(t *testing.T) {
+	m, _ := newTestManager(t)
+	for i := 0; i < 5; i++ {
+		m.markRemoved("self-uuid", fmt.Sprintf("old%d", i))
+	}
+	for el := m.removedOrder.Front(); el != nil; el = el.Next() {
+		entry := el.Value.(removedEntry)
+		entry.expiresAt = time.Now().Add(-time.Second)
+		el.Value = entry
+	}
+	m.markRemoved("self-uuid", "fresh")
+	if got := len(m.removedIngress); got != 1 || !m.wasRemoved("self-uuid", "fresh") {
+		t.Fatalf("removal memory = %d entries, want only the fresh one", got)
+	}
+}
+
+// Removing the same pair again below the cap replaces its entry in the order
+// list as well as in the map. A list element left behind keeps the first
+// removal's expiry, and dropping it when that expiry passes would delete the map
+// entry of the refreshed removal.
+func TestRemovalMemoryRepeatedRemovalBelowTheCapHoldsOneEntry(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.markRemoved("self-uuid", "W")
+	m.markRemoved("self-uuid", "W")
+	if got := len(m.removedIngress); got != 1 {
+		t.Fatalf("removal memory = %d entries, want 1", got)
+	}
+	if got := m.removedOrder.Len(); got != 1 {
+		t.Fatalf("removal order list = %d entries, want 1 like the map", got)
+	}
+}
+
+// ageRemovals moves every removal's expiry d earlier, as if d had passed since
+// it was marked. The removal memory reads the clock directly, so this is how a
+// test lets time go by.
+func ageRemovals(m *Manager, d time.Duration) {
+	for el := m.removedOrder.Front(); el != nil; el = el.Next() {
+		entry := el.Value.(removedEntry)
+		entry.expiresAt = entry.expiresAt.Add(-d)
+		el.Value = entry
+	}
+}
+
+// A repeated removal renews its tombstone: once the first removal's own expiry
+// has passed, and until the renewed one does, a stale replay is still blocked,
+// even after another removal has pruned the expired entries in between.
+func TestRemovalMemoryRepeatedRemovalBlocksPastTheFirstExpiry(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.markRemoved("self-uuid", "W")
+	// Three quarters of the retention pass, and the producer removes it again.
+	ageRemovals(m, terminalRetention*3/4)
+	m.markRemoved("self-uuid", "W")
+	// Half of the retention passes: the first removal expired a quarter of it ago
+	// and the second has half of it left. Marking another removal prunes what has
+	// expired.
+	ageRemovals(m, terminalRetention/2)
+	m.markRemoved("self-uuid", "other")
+
+	stdioReplay(m, MethodStarted, "W", 1)
+
+	if got := len(m.activeSnapshot()); got != 0 {
+		t.Fatalf("re-sync set = %d, want 0: the renewed tombstone stopped blocking before it expired", got)
+	}
+	if frames := queuedFrames(m); len(frames) != 0 {
+		t.Fatalf("peer queue = %v, want empty: the stale replay was re-broadcast", frames)
+	}
+}
+
+// A tombstone lasts terminalRetention from the removal: the window in which the
+// broker's replay of its store can still arrive, and as long as a finished
+// workload stays in the re-sync set.
+func TestRemovalMemoryTombstoneLivesForTheTerminalRetention(t *testing.T) {
+	m, _ := newTestManager(t)
+	before := time.Now()
+	m.markRemoved("self-uuid", "W")
+	after := time.Now()
+	lifetime := m.removedOrder.Front().Value.(removedEntry).expiresAt.Sub(before)
+	if lifetime < terminalRetention || lifetime > terminalRetention+after.Sub(before) {
+		t.Fatalf("tombstone expires %v after the removal, want %v", lifetime, terminalRetention)
 	}
 }

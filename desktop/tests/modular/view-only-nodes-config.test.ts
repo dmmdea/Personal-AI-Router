@@ -198,8 +198,7 @@ describe('view-only nodes config file', () => {
         initPlatform({
             getUserData: () => userData.dir,
             getTemp: () => userData.dir,
-            getResourcesPath: () => process.cwd(),
-            getAppName: () => 'Personal AI Router'
+            getResourcesPath: () => process.cwd()
         })
         return path.join(userData.dir, 'configs', 'view-only-nodes.json')
     }

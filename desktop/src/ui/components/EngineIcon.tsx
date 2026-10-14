@@ -5,11 +5,12 @@ import type { CSSProperties } from 'react'
 import { type WorkloadEngine } from '@/shared/types/workloads'
 import ollamaIcon from '@/ui/assets/engine-icons/ollama.png?inline'
 import lmStudioIcon from '@/ui/assets/engine-icons/lm-studio.png?inline'
+import llamaCppIcon from '@/ui/assets/engine-icons/llama-cpp.svg?inline'
 
 /**
- * Engine badge. Proxy engines get their logo; any other identifier (a
- * third-party producer on the workload-manager ingress, e.g. `llamacpp`,
- * `vllm`, `comfyui`) gets a generic monogram so the card still renders.
+ * Engine badge. PAIR's engines get their logo; any other identifier (a
+ * third-party producer on the workload-manager ingress, e.g. `vllm`,
+ * `comfyui`) gets a generic monogram so the card still renders.
  */
 export default function EngineIcon({ type, size = 32 }: { type: WorkloadEngine; size?: number }) {
     const dimension = `${size}px`
@@ -40,6 +41,14 @@ export default function EngineIcon({ type, size = 32 }: { type: WorkloadEngine; 
         return (
             <div style={containerStyle}>
                 <img src={lmStudioIcon} alt="LM Studio" style={imgStyle} />
+            </div>
+        )
+    }
+
+    if (type === 'llama-cpp') {
+        return (
+            <div style={containerStyle}>
+                <img src={llamaCppIcon} alt="llama.cpp" style={imgStyle} />
             </div>
         )
     }

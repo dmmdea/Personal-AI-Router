@@ -92,7 +92,7 @@ export function registerServiceIpc(): void {
             : ''
         return {
             appVersion: app.getVersion(),
-            modularProduct: manifest.product,
+            modularServices: manifest.services,
             binaries,
             licenseType
         }

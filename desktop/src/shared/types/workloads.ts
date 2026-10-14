@@ -9,8 +9,9 @@ export type WorkloadState = (typeof WorkloadStates)[number]
 /**
  * The engine a workload ran on. The proxy plane produces the closed
  * `EngineType` union; third-party producers on the workload-manager's
- * loopback ingress stamp their own identifiers (`llamacpp`, `vllm`,
- * `whispercpp`, `comfyui`, …). Those are still workloads the broker stored,
+ * loopback ingress stamp their own identifiers (`vllm`, `whispercpp`,
+ * `comfyui`, …; `llamacpp` maps to the built-in `llama-cpp`). Those are
+ * still workloads the broker stored,
  * so the desktop keeps the identifier instead of dropping the card.
  */
 export type WorkloadEngine = EngineType | (string & {})
