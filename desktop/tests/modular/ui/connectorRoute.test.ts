@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest'
-import { directPath, roundedPath, routeToNode, type Rect } from '@/ui/components/Workloads/connectorRoute'
+import {
+    directPath,
+    roundedPath,
+    routeToNode,
+    type Rect
+} from '@/ui/components/Workloads/connectorRoute'
 
 // A 3 x 2 grid like the operator's 4K window: 1100 px cards, 12 px gaps,
 // starting 60 px right of the job list's edge (x = 320).
@@ -35,7 +40,8 @@ function crossesACard(d: string, cards: readonly Rect[], target: Rect): boolean 
             const y = pts[i - 1].y + ((pts[i].y - pts[i - 1].y) * t) / 20
             for (const c of cards) {
                 if (c === target) continue
-                if (x > c.left + 1 && x < c.right - 1 && y > c.top + 1 && y < c.bottom - 1) return true
+                if (x > c.left + 1 && x < c.right - 1 && y > c.top + 1 && y < c.bottom - 1)
+                    return true
             }
         }
     }
@@ -45,7 +51,9 @@ function crossesACard(d: string, cards: readonly Rect[], target: Rect): boolean 
 describe('routeToNode', () => {
     it('keeps the direct line for a card that faces the job list', () => {
         const target = card(0, 1)
-        expect(routeToNode(start, target, 800, grid)).toBe(directPath(start, { x: target.left, y: 800 }))
+        expect(routeToNode(start, target, 800, grid)).toBe(
+            directPath(start, { x: target.left, y: 800 })
+        )
     })
 
     it('routes a line to column 3 through the gutters, never through a card', () => {

@@ -37,31 +37,8 @@ export function workloadExecutionNodeId(workload: Pick<Workload, 'scheduledOn'>)
     return workload.scheduledOn ?? null
 }
 
-/**
- * Label for the "which node" row on a job card, matched to the job's state so a
- * job that never ran is not described as having run.
- *
- * `workloadExecutionNodeId` only supplies the node name; the verb has to say
- * what happened there. A failed job with no `startedAt` was scheduled (or
- * failed before it began) but never executed, so it reads "Never started on".
- */
-export function workloadNodeRowLabel(workload: Pick<Workload, 'state' | 'startedAt'>): string {
-    switch (workload.state) {
-        case 'running':
-            return 'Running on'
-        case 'initializing':
-            return 'Starting on'
-        case 'queued':
-            return 'Queued on'
-        case 'completed':
-            return 'Ran on'
-        case 'failed':
-            return workload.startedAt != null ? 'Ran on' : 'Never started on'
-    }
-}
-
 /** Who asked for a workload, parsed from the backend's free-form `requesterId`. */
-export type WorkloadRequester =
+type WorkloadRequester =
     | { kind: 'fleet'; asker: string }
     | { kind: 'session'; label: string }
     | { kind: 'other'; label: string }
