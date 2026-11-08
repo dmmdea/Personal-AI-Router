@@ -19,7 +19,11 @@ import (
 // way; a row that has no source at all says so with
 // GPUInfo.UtilizationUnavailable instead of relying on the absence.
 type gpuStat struct {
-	VRAMUsed       uint64
+	VRAMUsed uint64
+	// VRAMTotal is the device's memory capacity when only the sampler knows it
+	// (an Axera card's CMM pool, which exists only in the vendor CLI's output);
+	// zero leaves the row's static vram_bytes alone.
+	VRAMTotal      uint64
 	UtilizationPct uint32
 	// TemperatureC is filled only by sources that expose a device thermal
 	// readout (the Linux accelerator sampler); zero means unavailable.

@@ -214,6 +214,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	applyGPUStats(previous, snap, gpu, sampledAt)
 	c.mergeAccelStats(snap)
 	mergeRockchipStats(snap)
+	mergeAxeraStats(snap)
 	mergeIntelStats(c.intelUtil, snap)
 	return snap
 }
