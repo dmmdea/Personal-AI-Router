@@ -233,8 +233,8 @@ func parseNvidiaSensors(out string) map[string]gpuSensorSample {
 			continue
 		}
 		var sample gpuSensorSample
-		if c, err := strconv.ParseUint(fields[1], 10, 32); err == nil {
-			sample.TemperatureC = uint32(c)
+		if c, ok := parseCelsius(fields[1]); ok {
+			sample.TemperatureC = c
 		}
 		if len(fields) >= 3 {
 			if w, ok := parseWatts(fields[2]); ok {

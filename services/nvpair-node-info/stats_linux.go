@@ -214,6 +214,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	applyGPUStats(previous, snap, gpu, sampledAt)
 	c.mergeAccelStats(snap)
 	mergeRockchipStats(snap)
+	mergeAxeraStats(snap)
 	mergeIntelStats(c.intelUtil, snap)
 	return snap
 }
@@ -442,11 +443,12 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		if mib, err := strconv.ParseUint(fields[2], 10, 64); err == nil {
 			stat.VRAMUsed = mib * 1024 * 1024
 		}
-		// temperature.gpu is whole degrees Celsius; [N/A] (some virtual or
-		// headless SKUs) and a missing column leave it zero (omitted).
+		// temperature.gpu is degrees Celsius, whole on most drivers and
+		// fractional on newer ones (parseCelsius rounds both); [N/A] (some
+		// virtual or headless SKUs) and a missing column leave it zero (omitted).
 		if len(fields) >= 4 {
-			if c, err := strconv.ParseUint(fields[3], 10, 32); err == nil {
-				stat.TemperatureC = uint32(c)
+			if c, ok := parseCelsius(fields[3]); ok {
+				stat.TemperatureC = c
 			}
 		}
 		// power.draw is watts with two decimals under -nounits, rounded to

@@ -85,7 +85,8 @@ func listApexDevices() []apexDevice {
 	return devs
 }
 
-// detectAccelerators returns one inventory row per apex device. The name is
+// detectAccelerators returns one inventory row per apex device (plus any Axera
+// card, see accel_axera_linux.go). The name is
 // resolved from the PCI ids behind the class entry's `device` link; the
 // dynamic fields are filled by buildResponse from the sampler keyed by
 // accelStatsKey.
@@ -96,7 +97,8 @@ func detectAccelerators() []GPUInfo {
 		device := readSysfs(filepath.Join(dev.dir, "device", "device"))
 		out = append(out, apexRow(apexProductName(vendor, device), dev.name))
 	}
-	return out
+	// Axera AX650N cards (accel_axera_linux.go) join the same accelerator list.
+	return append(out, detectAxeraCards()...)
 }
 
 // apexRow is one Edge TPU's inventory row. Its utilization is a real
