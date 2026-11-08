@@ -128,6 +128,20 @@ func parseWatts(s string) (float64, bool) {
 	return math.Round(v), true
 }
 
+// parseCelsius decodes nvidia-smi's temperature.gpu column (-nounits) to whole
+// degrees Celsius. Drivers have printed whole degrees ("61") for years, but the
+// R620+ Windows driver prints fractional degrees ("78.76"); an integer-only
+// parse dropped every reading on such a host, so the card showed no
+// temperature at all. [N/A] and garbage report unavailable (the field is then
+// omitted), and the value is rounded like power draw.
+func parseCelsius(s string) (uint32, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1000 {
+		return 0, false
+	}
+	return uint32(math.Round(v)), true
+}
+
 // parseEngineInstance pulls the adapter-LUID key and the engine-type tag
 // out of a PDH "GPU Engine" counter instance name, which looks like:
 //
