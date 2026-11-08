@@ -308,6 +308,9 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 			default:
 				gpu.VramUsedBytes = s.VRAMUsed
 			}
+			if s.VRAMTotal > 0 {
+				gpu.VramBytes = s.VRAMTotal
+			}
 			gpu.UtilizationPercent = s.UtilizationPct
 			if s.UtilizationKnown {
 				gpu.UtilizationSource = s.UtilizationSource

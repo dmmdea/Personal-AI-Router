@@ -109,6 +109,18 @@ const (
 // The first machine word of a COM object points at its method table; each
 // table slot is a function pointer. The implicit `this` (= iface) is
 // prepended to args automatically.
+//
+// Callers pass out-parameters as uintptr(unsafe.Pointer(&local)). Without the
+// directive below that conversion hides the pointer from escape analysis, so
+// the local stays on the goroutine stack; if the stack grows inside this call
+// (append, SyscallN) the runtime copies it and the system writes the result to
+// the old address. The caller then sees S_OK with its local still nil — the
+// intermittent "EnumAdapters1 failed ... hr=0x00000000" warning, which emptied
+// the adapter list and the temperature join for that pass. uintptrescapes moves
+// such pointees to the heap and keeps them alive for the call, exactly as
+// syscall.(*LazyProc).Call and x/sys/windows.(*Proc).Call do.
+//
+//go:uintptrescapes
 func vtableCall(iface unsafe.Pointer, index int, args ...uintptr) uintptr {
 	vtbl := *(**[64]uintptr)(iface)
 	fn := vtbl[index]
