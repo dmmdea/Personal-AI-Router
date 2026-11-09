@@ -220,3 +220,38 @@ describe('overview window on startup', () => {
         expect(shouldOpenOverviewOnStart(['/path/to/app', '--enable-logging'])).toBe(true)
     })
 })
+
+// 2026-11-09: the operator disabled PAIR's startup entry in Task Manager; the next
+// manual launch rewrote it from the stored preference (setLoginItemSettings defaults
+// `enabled` to true) and PAIR started at login again. The OS state must win.
+describe('launch reconcile leaves an entry the user disabled alone', () => {
+    it('opts out without writing, and keeps a matching enabled entry without writing', async () => {
+        platformMock.current = 'win32'
+        electronMock.isPackaged = true
+        const { reconcileLoginItem } = await import('@/electron/login-item')
+        const { APP_ID } = await import('@/shared/constants/app')
+        const entry = {
+            name: APP_ID,
+            path: process.execPath,
+            args: [APP_HIDDEN_ARGUMENT],
+            scope: 'user',
+            enabled: false
+        }
+        const settings = { launchAtLogin: true, startHidden: true }
+
+        electronMock.setLoginItemSettings.mockClear()
+        electronMock.getLoginItemSettings.mockReturnValue({
+            openAtLogin: true,
+            launchItems: [entry]
+        } as never)
+        expect(reconcileLoginItem(settings)).toBe('opt-out')
+        expect(electronMock.setLoginItemSettings).not.toHaveBeenCalled()
+
+        electronMock.getLoginItemSettings.mockReturnValue({
+            openAtLogin: true,
+            launchItems: [{ ...entry, enabled: true }]
+        } as never)
+        expect(reconcileLoginItem(settings)).toBe('keep')
+        expect(electronMock.setLoginItemSettings).not.toHaveBeenCalled()
+    })
+})

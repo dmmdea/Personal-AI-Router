@@ -70,17 +70,47 @@ export function roundedPath(points: readonly Point[], radius = CORNER_RADIUS): s
     return `${d} L ${last.x},${last.y}`
 }
 
+// Spacing between two lanes, and the clearance a lane keeps from a gutter's edge.
+const LANE_GAP = 4
+const LANE_EDGE = 2
+
+/**
+ * Which of `count` routed lines this one is. Routed lines share the strip beside
+ * the job list and the gutters between the cards, and until 2026-11-09 they ran
+ * on identical pixels there: a queued (yellow) and a running (blue) line to one
+ * node blended into a grey-green line that read as neither, and lines to
+ * different nodes could not be told apart where they shared a gutter.
+ */
+export interface Lane {
+    index: number
+    count: number
+}
+
+/**
+ * This lane's offset from the centre of a gutter `width` wide: the lanes are
+ * spread LANE_GAP apart around the centre, packed closer when the gutter is too
+ * narrow to hold them, and always LANE_EDGE clear of its edges.
+ */
+export function laneOffset(lane: Lane | undefined, width: number): number {
+    if (!lane || lane.count <= 1) return 0
+    const half = Math.max(0, width / 2 - LANE_EDGE)
+    const spread = Math.min(half, ((lane.count - 1) * LANE_GAP) / 2)
+    return ((lane.index / (lane.count - 1)) * 2 - 1) * spread
+}
+
 /**
  * The path from a job card (start, on its right edge) to a node card to its
  * right. `anchorY` is where the line enters the node card; `cards` is every
  * node card on screen (the target included). A card with no other card
- * between it and the job list keeps the direct line.
+ * between it and the job list keeps the direct line. `lane` separates this
+ * line from the other routed lines (see {@link Lane}).
  */
 export function routeToNode(
     start: Point,
     target: Rect,
     anchorY: number,
-    cards: readonly Rect[]
+    cards: readonly Rect[],
+    lane?: Lane
 ): string {
     const end = { x: target.left, y: anchorY }
     const others = cards.filter(
@@ -93,7 +123,8 @@ export function routeToNode(
     if (inFront.length === 0) return directPath(start, end)
 
     // The vertical gutter just left of the target.
-    const colGapX = (Math.max(...inFront.map(c => c.right)) + target.left) / 2
+    const inFrontRight = Math.max(...inFront.map(c => c.right))
+    const colGapX = (inFrontRight + target.left) / 2 + laneOffset(lane, target.left - inFrontRight)
 
     // The horizontal gutter: below the target's row when a row follows,
     // otherwise above it, otherwise just under the grid.
@@ -105,21 +136,25 @@ export function routeToNode(
         .filter(c => c.bottom <= target.top + 1)
         .sort((a, b) => b.bottom - a.bottom)[0]
     const gutterY = below
-        ? (target.bottom + below.top) / 2
+        ? (target.bottom + below.top) / 2 + laneOffset(lane, below.top - target.bottom)
         : above
-          ? (above.bottom + target.top) / 2
-          : target.bottom + 6
+          ? (above.bottom + target.top) / 2 + laneOffset(lane, target.top - above.bottom)
+          : target.bottom + 6 + laneOffset(lane, 12)
 
     // The vertical run beside the job list: midway across the strip.
     const gridLeft = Math.min(...cards.map(c => c.left))
-    const stripX = (start.x + gridLeft) / 2
+    const stripX = (start.x + gridLeft) / 2 + laneOffset(lane, gridLeft - start.x)
+
+    // Lines to one card enter it at slightly different heights, so their last
+    // stretch does not coincide either.
+    const entryY = anchorY + laneOffset(lane, 16)
 
     return roundedPath([
         start,
         { x: stripX, y: start.y },
         { x: stripX, y: gutterY },
         { x: colGapX, y: gutterY },
-        { x: colGapX, y: anchorY },
-        end
+        { x: colGapX, y: entryY },
+        { x: end.x, y: entryY }
     ])
 }

@@ -22,4 +22,11 @@ export interface NodeItem {
      * endpoint and nothing else, so its card carries no engine controls or actions.
      */
     viewOnly?: boolean
+    /**
+     * node-info sampled the GPUs once but its last sample is older than
+     * GPU_READINGS_STALE_MS: the figures on the card are frozen, not live. Absent
+     * while the readings are fresh, and on a node with no GPU sampler at all
+     * (an Orange Pi's Mali reports `telemetryValid: false` by design).
+     */
+    gpuReadingsStale?: boolean
 }

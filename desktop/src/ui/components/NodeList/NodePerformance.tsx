@@ -342,15 +342,11 @@ export default function NodePerformance({
                                     placeholder. */}
                                     {thermal && (
                                         <Flex align="center" gap="2">
-                                            <div
-                                                className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3 rounded-full transition-opacity"
-                                                style={{
-                                                    backgroundColor: `${gpu.color}BF`,
-                                                    border: `2px solid ${gpu.color}`,
-                                                    marginTop: '1px',
-                                                    opacity: isGpuSelected ? 1 : 0.3
-                                                }}
-                                            />
+                                            {/* No colour dot: temperature and power are
+                                            never plotted, and the Usage colour here read
+                                            as a chart series. The empty box keeps the
+                                            text aligned with the rows above. */}
+                                            <div className="w-3 h-3 min-w-3 min-h-3 max-w-3 max-h-3" />
                                             <Flex
                                                 align="center"
                                                 gap="2"

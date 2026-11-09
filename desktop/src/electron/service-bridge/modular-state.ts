@@ -51,6 +51,34 @@ const log = createStructuredLogger('service-bridge')
 
 // A view-only machine is untrusted, so what it may make the UI hold is bounded.
 export const VIEW_ONLY_MAX_GPUS = 16
+/**
+ * Consecutive unanswered node-info polls after which a view-only card goes
+ * Offline. Two, so one dropped poll does not make a card flicker; the poller
+ * backs off between them, so that is about three poll intervals of silence.
+ */
+export const VIEW_ONLY_OFFLINE_AFTER_FAILURES = 2
+
+/**
+ * Age of node-info's last GPU sample beyond which a card's GPU figures are
+ * frozen rather than live. node-info samples every second (nvidia-smi every
+ * 5 s on Windows), so 30 s is several missed samples, not one slow one.
+ */
+export const GPU_READINGS_STALE_MS = 30_000
+
+/**
+ * Whether a node-info answer says its GPU readings stopped updating: it has
+ * sampled them (`telemetryValid`) and the last sample is `msSince` old. The UI
+ * read neither field before, so a hung sampler left a card showing the last
+ * figures as if they were live. A node that never samples a GPU sends
+ * `telemetryValid: false` and is never stale.
+ */
+function gpuReadingsStale(obj: JsonObject): boolean {
+    return (
+        obj.telemetryValid === true &&
+        typeof obj.msSince === 'number' &&
+        obj.msSince > GPU_READINGS_STALE_MS
+    )
+}
 // Live node sources are the reverse proxies, relayed through the broker, and
 // the broker's consolidated discovery snapshot. Electron does not consume
 // worker discovery protocols directly.
@@ -109,6 +137,8 @@ interface ModularNode {
     // invited into another).
     trusted: boolean
     clustered: boolean
+    // node-info's GPU sample is older than GPU_READINGS_STALE_MS (gpuReadingsStale).
+    gpuReadingsStale?: boolean
     nodeInfoPort: number
     nodeInfoUp: boolean
     // The node's own ranked candidate list from broker discovery
@@ -621,10 +651,13 @@ function normalizeLastSeen(value: number): number {
  * shown holding 25.5 GB of the box's 66 GB.
  *
  * A row with dedicated memory always has a figure — 0 from a discrete card is
- * a real reading, or a pre-first-sample gap the chart already handles — so the
- * question is only ever asked of a unified row.
+ * a real reading, or a pre-first-sample gap the chart already handles. A row
+ * with no memory at all (vram_bytes absent, as for a Coral Edge TPU) has
+ * nothing to chart: its 0-of-0 series drew a flat line at zero with no legend
+ * row on the node's chart.
  */
 function reportsMemoryUsage(gpu: ModularGpu): boolean {
+    if (gpu.vramBytes <= 0) return false
     return !(gpu.memoryPool === MEMORY_POOL_UNIFIED && gpu.vramUsedBytes === 0)
 }
 
@@ -751,7 +784,8 @@ function toNodeItem(node: ModularNode, selfId: string | null, viewOnly = false):
         // back to a placeholder. Remote OS is not reported by the current
         // discovery/node-info contract.
         os: node.id === selfId ? platformDisplayName(currentPlatform()) : 'Windows',
-        ...(viewOnly ? { viewOnly: true } : {})
+        ...(viewOnly ? { viewOnly: true } : {}),
+        ...(node.gpuReadingsStale ? { gpuReadingsStale: true } : {})
     }
 }
 
@@ -994,6 +1028,7 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
         left.reachableAddress === right.reachableAddress &&
         left.nodeInfoPort === right.nodeInfoPort &&
         left.nodeInfoUp === right.nodeInfoUp &&
+        Boolean(left.gpuReadingsStale) === Boolean(right.gpuReadingsStale) &&
         // Order matters for the broker's list and only for it: that order is the
         // node's own ranking of where to reach it, and it drives the poll order.
         sameStringList(left.brokerAddresses, right.brokerAddresses) &&
@@ -1445,6 +1480,24 @@ class ModularBridgeState {
         emitBridgePush('metrics:update', toMetrics(node))
     }
 
+    /**
+     * A view-only machine whose node-info stopped answering goes Offline.
+     *
+     * Its card was created up and only an answer naming another machine took it
+     * down, so a powered-off or unreachable view-only machine stayed Active with
+     * its last readings for as long as the app ran (register N-36). Nothing but
+     * the poll knows it is there, so the poll's silence is the signal. The card
+     * comes back with the next answer that names it (mergeViewOnlyTelemetry).
+     */
+    noteViewOnlyNodeSilent(nodeId: string, consecutiveFailures: number): void {
+        const node = this.viewOnlyNodes.get(nodeId)
+        if (!node || !node.nodeInfoUp) return
+        if (consecutiveFailures < VIEW_ONLY_OFFLINE_AFTER_FAILURES) return
+        const next: ModularNode = { ...node, nodeInfoUp: false }
+        this.viewOnlyNodes.set(next.id, next)
+        this.emitViewOnlyNodeChanged(next)
+    }
+
     private mergeViewOnlyTelemetry(node: ModularNode, obj: JsonObject): void {
         // The machine names itself, so its answer counts only when it names the
         // configured UUID. Any other answer, or none, also drops what an earlier
@@ -1470,7 +1523,12 @@ class ModularBridgeState {
         const memory = memoryValue(obj.memory)
         const inferenceHardwareIds =
             optionalStringArrayValue(obj.inference_hardware_ids) ?? inferenceReadyIds(node.id, gpus)
-        if (node.nodeInfoUp && sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)) {
+        const stale = gpuReadingsStale(obj)
+        if (
+            node.nodeInfoUp &&
+            Boolean(node.gpuReadingsStale) === stale &&
+            sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)
+        ) {
             emitBridgePush('metrics:update', toMetrics(node))
             return
         }
@@ -1480,7 +1538,8 @@ class ModularBridgeState {
             cpu,
             memory,
             inferenceHardwareIds,
-            nodeInfoUp: true
+            nodeInfoUp: true,
+            gpuReadingsStale: stale
         }
         this.viewOnlyNodes.set(next.id, next)
         this.emitViewOnlyNodeChanged(next)
@@ -1512,7 +1571,12 @@ class ModularBridgeState {
         // own inference_ready flags decide (see inferenceReadyIds).
         const inferenceHardwareIds =
             optionalStringArrayValue(obj.inference_hardware_ids) ?? inferenceReadyIds(nodeId, gpus)
-        if (node.nodeInfoUp && sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)) {
+        const stale = gpuReadingsStale(obj)
+        if (
+            node.nodeInfoUp &&
+            Boolean(node.gpuReadingsStale) === stale &&
+            sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)
+        ) {
             emitBridgePush('metrics:update', toMetrics(node))
             return
         }
@@ -1523,7 +1587,8 @@ class ModularBridgeState {
             cpu,
             memory,
             inferenceHardwareIds,
-            nodeInfoUp: true
+            nodeInfoUp: true,
+            gpuReadingsStale: stale
         })
     }
 

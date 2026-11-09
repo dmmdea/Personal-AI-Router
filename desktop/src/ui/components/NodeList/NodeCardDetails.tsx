@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Flex, Stack } from '@nvidia/foundations-react-core'
+import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { BarChartOutlined, SettingsOutlined } from '@/ui/components/icons'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import type { NodeItem } from '@/shared/types/nodes'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
-import { useNodeActiveJobCount } from '@/ui/stores/workloads.store'
+import { useNodeActiveJobCount, useNodeHasRunningJob } from '@/ui/stores/workloads.store'
+import { getWorkloadStateColor } from '@/ui/utils/colors'
+import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import GpuRadialChartSvg from '@/ui/components/GpuRadialChartSvg'
 import NodeLabel from './NodeLabel'
@@ -123,7 +125,9 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
         const memUsage = nodeMetrics ? getLatestValue(nodeMetrics.memoryUsage) : 0
         return {
             model: node.topology.cpu.model,
-            usage: Math.round(cpuUsage),
+            // Floored like every other usage figure (NodePerformance, hardware-rows),
+            // so the legend and the expanded panel never disagree by one.
+            usage: Math.floor(cpuUsage),
             usageColor: CHART_COLORS.CPU,
             temperature: nodeMetrics?.cpuTemperature ?? 0,
             power: nodeMetrics?.cpuPower ?? 0,
@@ -135,6 +139,13 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
     }, [hasGpu, node, nodeMetrics])
 
     const jobCount = useNodeActiveJobCount(node.id)
+    // The ring takes the node's colour only while a job RUNS there. A node with
+    // only queued jobs gets the queued colour, the same as their lines, so a
+    // halo no longer says "working" about a node that is still waiting.
+    const hasRunningJob = useNodeHasRunningJob(node.id)
+    const ringColor = hasRunningJob
+        ? baseColor
+        : WORKLOAD_COLOR_MAP[getWorkloadStateColor('queued')]
 
     // Performance chart and engine settings are mutually exclusive — opening one
     // collapses the other so only a single section is ever expanded per card.
@@ -276,7 +287,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                                 >
                                     {metricsReady ? (
                                         <>
-                                            <NodeActive show={jobCount > 0} color={baseColor} />
+                                            <NodeActive show={jobCount > 0} color={ringColor} />
                                             <GpuRadialChartSvg
                                                 metrics={chartMetrics}
                                                 size={chartSize}
@@ -307,6 +318,16 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                                 isLocal={isLocal}
                                 isViewOnly={node.viewOnly}
                             />
+                            {node.gpuReadingsStale && (
+                                // The node answers but its GPU sampler has stopped:
+                                // the figures below are the last ones it took.
+                                <Text
+                                    kind="body/regular/sm"
+                                    style={{ color: 'var(--text-color-feedback-warning)' }}
+                                >
+                                    GPU readings stopped updating
+                                </Text>
+                            )}
                         </div>
                         <Flex
                             align="center"

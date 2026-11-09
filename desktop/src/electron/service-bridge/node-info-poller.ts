@@ -241,6 +241,14 @@ async function pollTarget(
     if (run.aborted) return
     if (!cooling) pollChoices.set(nodeId, { host: null, walkedAt: Date.now(), targetKey })
     noteNotAnswering(nodeId, failed, port, targetKey)
+    // A view-only machine is known only through this poll, so its silence is what
+    // takes its card Offline (register N-36); a member has the cluster for that.
+    if (viewOnly) {
+        getModularBridgeState().noteViewOnlyNodeSilent(
+            nodeId,
+            pollBackoffs.get(nodeId)?.consecutiveFailures ?? 1
+        )
+    }
 }
 
 /**

@@ -194,6 +194,17 @@ export function useNodeActiveJobCount(nodeId: string): number {
     })
 }
 
+// Whether any workload scheduled on a node is running (not only queued). A
+// primitive, for the same re-render reason as useNodeActiveJobCount.
+export function useNodeHasRunningJob(nodeId: string): boolean {
+    return useWorkloadsStore(state => {
+        for (const w of state.workloads.values()) {
+            if (w.state === 'running' && workloadExecutionNodeId(w) === nodeId) return true
+        }
+        return false
+    })
+}
+
 export function useCompletedWorkloads(): Workload[] {
     return useWorkloadsStore(
         useShallow(state => {
