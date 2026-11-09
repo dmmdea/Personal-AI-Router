@@ -113,7 +113,9 @@ function NodeChartLegend({
                         readout gets "Power 200 W" instead. */}
                         {thermal && (
                             <Flex align="center" gap="2">
-                                <ColorDot color={gpu.usageColor} />
+                                {/* A reading, not a chart series: no colour dot, only
+                                its width, so the text stays aligned with the rows above. */}
+                                <div style={{ width: dotSize, flexShrink: 0 }} />
                                 <Text kind="body/regular/sm" className="text-subtle-color">
                                     {thermal.label}
                                 </Text>

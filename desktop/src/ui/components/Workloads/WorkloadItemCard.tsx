@@ -9,7 +9,7 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
 import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { getWorkloadColorBar } from '@/ui/utils/colors'
-import { workloadNodeLabel } from '@/ui/utils/workload-labels'
+import { isHeldBack, workloadNodeLabel } from '@/ui/utils/workload-labels'
 import EngineIcon from '@/ui/components/EngineIcon'
 
 const formatDate = (timestamp: number) => {
@@ -75,6 +75,8 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
         requester?.kind === 'session' || requester?.kind === 'other' ? requester.label : ''
     const barColor = useMemo(() => getWorkloadColorBar(workload.state), [workload.state])
 
+    const heldBack = isHeldBack(workload)
+
     const subtext = useMemo(() => {
         const state = workload.state
         let value = workload.createdAt
@@ -95,7 +97,7 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                 break
             case 'completed':
                 value = workload.completedAt ?? 0
-                label = 'Completed at'
+                label = heldBack ? 'Held back at' : 'Completed at'
                 break
             case 'failed':
                 value = workload.completedAt ?? 0
@@ -117,7 +119,7 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                 </Text>
             </Flex>
         )
-    }, [workload.state, workload.createdAt, workload.startedAt, workload.completedAt])
+    }, [workload.state, workload.createdAt, workload.startedAt, workload.completedAt, heldBack])
 
     const className = useMemo(() => {
         let result = `h-auto dir-ltr max-w-full min-w-0 pair-paper workload-card workload-card-${workload.state}`
@@ -195,6 +197,12 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                         kind="body/regular/sm"
                         style={{ color: 'var(--text-color-feedback-danger)' }}
                     >
+                        {workload.error}
+                    </Text>
+                )}
+                {heldBack && (
+                    // Why it did not run, without the red of a failure: nothing broke.
+                    <Text kind="body/regular/sm" className="text-subtle-color">
                         {workload.error}
                     </Text>
                 )}

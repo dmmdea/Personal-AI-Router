@@ -91,18 +91,47 @@ function computeConnections(svg: SVGSVGElement, workloads: readonly Workload[]):
         })
     }
 
+    // Measure every line first: the lines that run to the right share the strip
+    // beside the job list and the gutters between the cards, so each gets its own
+    // lane (connectorRoute.Lane), assigned in target order so lines to one card
+    // sit side by side.
+    const measured: {
+        workload: Workload
+        executionNodeId: string
+        workloadEl: Element
+        nodeEl: Element
+        workloadRect: DOMRect
+        nodeRect: DOMRect
+    }[] = []
     for (const workload of workloads) {
         const executionNodeId = workloadExecutionNodeId(workload)
         if (!executionNodeId) continue
-
         const workloadEl = workloadElByKey.get(
             anchorKey(workload.originatedFrom ?? '', workload.id)
         )
         const nodeEl = nodeElById.get(executionNodeId)
         if (!workloadEl || !nodeEl) continue
+        measured.push({
+            workload,
+            executionNodeId,
+            workloadEl,
+            nodeEl,
+            workloadRect: workloadEl.getBoundingClientRect(),
+            nodeRect: nodeEl.getBoundingClientRect()
+        })
+    }
+    const rightward = measured
+        .filter(m => m.nodeRect.left >= m.workloadRect.left)
+        .sort(
+            (a, b) =>
+                a.nodeRect.top - b.nodeRect.top ||
+                a.nodeRect.left - b.nodeRect.left ||
+                Number(a.workload.state === 'running') - Number(b.workload.state === 'running')
+        )
+    const laneOf = new Map(rightward.map((m, index) => [m, { index, count: rightward.length }]))
 
-        const workloadRect = workloadEl.getBoundingClientRect()
-        const nodeRect = nodeEl.getBoundingClientRect()
+    for (const m of measured) {
+        const { workload, executionNodeId, nodeEl, workloadRect, nodeRect } = m
 
         const chartEl = nodeEl.querySelector('[data-node-gpu-chart-anchor]')
         const chartRect = chartEl?.getBoundingClientRect()
@@ -138,7 +167,8 @@ function computeConnections(svg: SVGSVGElement, workloads: readonly Workload[]):
                     bottom: nodeRect.bottom - svgRect.top
                 },
                 nodeAnchorY,
-                cardRects
+                cardRects,
+                laneOf.get(m)
             )
         }
 
@@ -153,7 +183,9 @@ function computeConnections(svg: SVGSVGElement, workloads: readonly Workload[]):
         })
     }
 
-    return result
+    // SVG paints in document order: queued lines first, so a running line is
+    // never painted over by a queued one where the two still meet.
+    return result.sort((a, b) => Number(a.isRunning) - Number(b.isRunning))
 }
 
 function WorkloadNodeConnections({
